@@ -1,0 +1,4 @@
+[submodule "tools/oracle/OpenCRG"]
+	path = tools/oracle/OpenCRG
+	url = https://github.com/asam-ev/OpenCRG.git
+	shallow = true

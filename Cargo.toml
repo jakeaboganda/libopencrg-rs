@@ -1,0 +1,12 @@
+[package]
+name = "opencrg"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Reader and evaluator for ASAM OpenCRG road surface files"
+categories = ["parser-implementations", "science::geo", "simulation"]
+keywords = ["opencrg", "road", "asam", "simulation", "elevation"]
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE*"]
+
+[dependencies]

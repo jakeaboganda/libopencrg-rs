@@ -1,0 +1,57 @@
+ASAM OpenCRG®
+Copyright 2025 ASAM e.V.
+
+This product includes software developed at ASAM e.V. (https://www.asam.net/) and others.
+
+The ASAM OpenCRG project is inherited from the original OpenCRG initiative of the German automotive industry.
+Contributors to previous and current versions include:
+
+Copyright 2005–2019 Daimler AG – Jochen Rauh
+Copyright 2005–2011 Daimler AG – Klaus Mueller
+Copyright 2008–2014 VIRES Simulationstechnologie GmbH – Marius Dupuis
+Copyright 2008–2017 VIRES Simulationstechnologie GmbH – Holger Helmich
+Copyright 2019      VIRES Simulationstechnologie GmbH – Marius Dupuis
+Copyright 2020-2026 3D Mapping Solutions GmbH – Sebastian Tuttas
+Copyright 2025-2026 3D Mapping Solutions GmbH – Patrick Kuemmerle
+Copyright 2025-2026 VehicleSystemDynamics - Jochen Rauh
+Copyright 2026      BMW AG - Thomas Bleher
+Copyright 2026      ASAM e.V. – Clemens Linnhoff
+
+In 2026, ASAM reinstated the Apache 2.0 license for ASAM OpenCRG Version 2.0.0.
+All relevant license statements have been updated accordingly without functional changes.
+
+ASAM OpenCRG® is a registered trademark of ASAM e.V.
+
+More Information on ASAM OpenCRG can be found here:
+https://www.asam.net/standards/detail/opencrg/
+------------------------------------------------------------------------
+ASAM OpenCRG subcomponents:
+The ASAM OpenCRG includes a number of subcomponents with
+separate copyright notices and license terms. Your use
+of the source code for the these subcomponents is subject
+to the terms and conditions of the following licenses.
+------------------------------------------------------------------------
+For the matlab/lib/crg_pxy2ppxy.m subcomponent splinefit:
+Copyright (c) 2009, Jonas Lundgren
+All rights reserved.
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+* Redistributions of source code must retain the above copyright
+ notice, this list of conditions and the following disclaimer.
+* Redistributions in binary form must reproduce the above copyright
+ notice, this list of conditions and the following disclaimer in
+ the documentation and/or other materials provided with the distribution
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+------------------------------------------------------------------------

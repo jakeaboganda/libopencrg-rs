@@ -150,7 +150,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(test: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("opencrg-{test}-{}", std::process::id()));
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("include-{test}"));
         std::fs::create_dir_all(&dir).unwrap();
         Scratch(dir)
     }

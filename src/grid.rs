@@ -2,7 +2,7 @@
 //! `crgDataSetModifiersApply` of the C-API.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::{env, fs, io};
 
 use crate::eval::Borders;
@@ -132,14 +132,14 @@ impl CrgGrid {
         let top = path.as_ref();
         let io_error = |path: &Path, e: io::Error| Error::io(path.display().to_string(), &e);
         let bytes = fs::read(top).map_err(|e| io_error(top, e))?;
-        let top_id = fs::canonicalize(top).map_err(|e| io_error(top, e))?;
+        let top_id = file_id(top);
         let mut include = |chain: &[String]| {
             let mut file = top.to_path_buf();
             let mut seen = vec![top_id.clone()];
             for name in chain {
                 let dir = file.parent().unwrap_or(Path::new(""));
                 file = dir.join(expand_variables(name)?);
-                let id = fs::canonicalize(&file).map_err(|e| io_error(&file, e))?;
+                let id = file_id(&file);
                 if seen.contains(&id) {
                     return Err(Error::IncludeCycle(file.display().to_string()));
                 }
@@ -337,6 +337,26 @@ impl CrgGrid {
     pub fn v_range(&self) -> (f64, f64) {
         (self.v.nodes[0], self.v.nodes[self.v.nodes.len() - 1])
     }
+}
+
+/// Identifies a file for cycle detection: its canonical path, or where that fails, as it
+/// always does on WASI, the path with `.` and `..` removed.
+fn file_id(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        let mut id = PathBuf::new();
+        for part in path.components() {
+            match part {
+                Component::CurDir => {}
+                Component::ParentDir
+                    if matches!(id.components().next_back(), Some(Component::Normal(_))) =>
+                {
+                    id.pop();
+                }
+                part => id.push(part),
+            }
+        }
+        id
+    })
 }
 
 /// Replaces each `$NAME` in an include name, where the name runs to the next `/`, with the

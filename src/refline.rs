@@ -256,14 +256,7 @@ impl RefLine {
     /// Global position of a grid position (crgEvaluv2xy.c:55).
     pub fn xy(&self, u: &UAxis, uv: Uv) -> Xy {
         let v = uv.v;
-        let mut frac = (uv.u - u.first) / u.inc;
-        let index = if frac < 0.0 {
-            0
-        } else {
-            (frac as usize).min(u.n - 2)
-        };
-        frac -= index as f64;
-
+        let (index, frac) = segment(u, uv.u);
         if frac < 0.0 {
             let du = frac * u.inc;
             let e = &self.first;
@@ -281,6 +274,46 @@ impl RefLine {
             };
         }
 
+        let (n1, n2) = self.mitres(index);
+        let a = [self.x[index] + v * n1[0], self.y[index] + v * n1[1]];
+        let b = [self.x[index + 1] + v * n2[0], self.y[index + 1] + v * n2[1]];
+        let ab = [b[0] - a[0], b[1] - a[1]];
+        Xy {
+            x: a[0] + frac * ab[0],
+            y: a[1] + frac * ab[1],
+        }
+    }
+
+    /// Derivatives of [`xy`](Self::xy) by u and by v, within the segment `xy` uses.
+    pub fn jacobian(&self, u: &UAxis, uv: Uv) -> ([f64; 2], [f64; 2]) {
+        let (index, frac) = segment(u, uv.u);
+        let end = if frac < 0.0 {
+            Some(&self.first)
+        } else if frac > 1.0 {
+            Some(&self.last)
+        } else {
+            None
+        };
+        if let Some(e) = end {
+            return ([e.cos, e.sin], [-e.sin, e.cos]);
+        }
+        let (n1, n2) = self.mitres(index);
+        let v = uv.v;
+        let ab = [
+            self.x[index + 1] + v * n2[0] - (self.x[index] + v * n1[0]),
+            self.y[index + 1] + v * n2[1] - (self.y[index] + v * n1[1]),
+        ];
+        (
+            [ab[0] / u.inc, ab[1] / u.inc],
+            [
+                n1[0] + frac * (n2[0] - n1[0]),
+                n1[1] + frac * (n2[1] - n1[1]),
+            ],
+        )
+    }
+
+    /// Offset directions at both ends of segment `index`, scaled per metre of v.
+    fn mitres(&self, index: usize) -> ([f64; 2], [f64; 2]) {
         let p1 = [self.x[index], self.y[index]];
         let p2 = [self.x[index + 1], self.y[index + 1]];
         let n12 = normalize([-(p2[1] - p1[1]), p2[0] - p1[0]]);
@@ -293,7 +326,6 @@ impl RefLine {
             n1 = normalize([-(p2[1] - p0[1]), p2[0] - p0[0]]);
         }
         let n1 = stretch(n1, n12);
-        let a = [p1[0] + v * n1[0], p1[1] + v * n1[1]];
 
         let mut n2 = n12;
         if index < self.x.len() - 2 {
@@ -301,13 +333,7 @@ impl RefLine {
             n2 = normalize([-(p3[1] - p1[1]), p3[0] - p1[0]]);
         }
         let n2 = stretch(n2, n12);
-        let b = [p2[0] + v * n2[0], p2[1] + v * n2[1]];
-
-        let ab = [b[0] - a[0], b[1] - a[1]];
-        Xy {
-            x: a[0] + frac * ab[0],
-            y: a[1] + frac * ab[1],
-        }
+        (n1, n2)
     }
 
     /// Heading and curvature (crgEvalpk.c), with curvature taken at offset v as in the
@@ -362,6 +388,18 @@ impl RefLine {
             }
         }
     }
+}
+
+/// Segment of the reference line used at `at`, and the position within it; negative before
+/// the first node and above 1 after the last.
+fn segment(u: &UAxis, at: f64) -> (usize, f64) {
+    let frac = (at - u.first) / u.inc;
+    let index = if frac < 0.0 {
+        0
+    } else {
+        (frac as usize).min(u.n - 2)
+    };
+    (index, frac - index as f64)
 }
 
 fn normalize(v: [f64; 2]) -> [f64; 2] {

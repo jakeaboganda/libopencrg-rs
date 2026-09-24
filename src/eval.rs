@@ -137,10 +137,11 @@ impl CrgGrid {
         self.refline.heading(&self.u, uv)
     }
 
-    /// Unit surface normal at `uv` in the global frame, from the slopes of
-    /// [`elevation_at_uv`](Self::elevation_at_uv) within the evaluated cell. Returns `None`
-    /// where the elevation is `None`, and where `uv` lies at or beyond the reference line's
-    /// centre of curvature, where the grid folds over itself.
+    /// Unit upward normal at `uv` of the surface traced by [`xy_from_uv`](Self::xy_from_uv)
+    /// and [`elevation_at_uv`](Self::elevation_at_uv), exact within the evaluated grid cell
+    /// and reference-line segment. Returns `None` where the elevation is `None`, and where
+    /// the xy mapping folds over itself, at or beyond the reference line's centre of
+    /// curvature.
     pub fn normal_at_uv(&self, uv: Uv) -> Option<Normal> {
         let cell = self.locate(uv, &self.borders)?;
         let (mut dz_du, mut dz_dv) = (0.0, 0.0);
@@ -166,16 +167,16 @@ impl CrgGrid {
             (dz_du, dz_dv) = (0.0, 0.0);
         }
 
-        let reference = self.refline.reference_heading(&self.u, uv.u);
-        let s = 1.0 - uv.v * reference.curvature;
-        if s <= 0.0 || s.is_nan() {
+        // Normal of the surface (x, y, z)(u, v): the cross product of its u and v tangents.
+        let (xy_du, xy_dv) = self.refline.jacobian(&self.u, uv);
+        let upward = xy_du[0] * xy_dv[1] - xy_du[1] * xy_dv[0];
+        if upward <= 0.0 || upward.is_nan() {
             return None;
         }
-        let (sin, cos) = reference.phi.sin_cos();
         let n = [
-            s * sin * dz_dv - cos * dz_du,
-            -sin * dz_du - s * cos * dz_dv,
-            s,
+            xy_du[1] * dz_dv - dz_du * xy_dv[1],
+            dz_du * xy_dv[0] - xy_du[0] * dz_dv,
+            upward,
         ];
         let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
         Some(Normal {
@@ -476,13 +477,11 @@ mod tests {
 
     #[test]
     fn normals_match_the_surface() {
-        // Exact on straight lines, up to rounding in the differences.
+        // Exact up to rounding in the differences.
         assert!(normal_error("handmade_sloped.crg") < 1e-9);
         assert!(normal_error("handmade_banked.crg") < 1e-9);
-        // On curves the C-API's xy mapping is piecewise linear with mitred offsets, while
-        // the normal uses the heading and curvature of `heading_at_uv`.
-        assert!(normal_error("handmade_curved_banked_sloped.crg") < 5e-4);
-        assert!(normal_error("handmade_circle.crg") < 5e-4);
+        assert!(normal_error("handmade_curved_banked_sloped.crg") < 1e-9);
+        assert!(normal_error("handmade_circle.crg") < 1e-9);
     }
 
     #[test]

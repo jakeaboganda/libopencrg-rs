@@ -3,7 +3,8 @@
 
 use crate::eval::Borders;
 use crate::parse::{self, Mods, NanMode, Options, Parsed, Road};
-use crate::{BorderMode, Error, LoadOptions, Uv};
+use crate::refline::RefLine;
+use crate::{BorderMode, Error, LoadOptions, Uv, Xy};
 
 /// A loaded OpenCRG road surface.
 ///
@@ -19,6 +20,7 @@ pub struct CrgGrid {
     pub(crate) ref_z: Profile,
     /// `None` when the file defines no banking.
     pub(crate) bank: Option<Profile>,
+    pub(crate) refline: RefLine,
     pub(crate) borders: Borders,
 }
 
@@ -59,6 +61,15 @@ impl Profile {
             Self::Nodes(values) => values[i] + frac * (values[i + 1] - values[i]),
         }
     }
+
+    /// Change from node `i` to node `i + 1`.
+    #[inline]
+    pub fn step(&self, i: usize) -> f64 {
+        match self {
+            Self::Constant(_) => 0.0,
+            Self::Nodes(values) => values[i + 1] - values[i],
+        }
+    }
 }
 
 impl CrgGrid {
@@ -95,6 +106,7 @@ impl CrgGrid {
             n: p.nu,
         };
         let v = v_axis(road, p.v, p.v_from_positions)?;
+        let refline = RefLine::new(road, &u, p.phi);
 
         // Without a $ROAD_CRG_MODS block the C-API applies its default modifiers; a block
         // replaces them entirely (crgOptionMgmt.c:507, crgLoader.c:1021).
@@ -137,16 +149,18 @@ impl CrgGrid {
             z_shift: 0.0,
             ref_z,
             bank,
+            refline,
             borders: borders(&LoadOptions::default()),
         };
-        grid.place_z(road, &mods);
+        grid.place(road, &mods);
         grid.borders = borders(caller);
         Ok(grid)
     }
 
-    /// Shifts elevations so the reference point lands at the requested height, as the z part
-    /// of `crgDataApplyTransformations` (crgMgr.c:785) does.
-    fn place_z(&mut self, road: &Road, mods: &Mods) {
+    /// Moves the data set as `crgDataApplyTransformations` (crgMgr.c:785) does: either the
+    /// reference point lands at the requested position and heading, or the reference line is
+    /// offset and rotated.
+    fn place(&mut self, road: &Road, mods: &Mods) {
         let refpoint = mods.refpoint_x.is_some()
             || mods.refpoint_y.is_some()
             || mods.refpoint_z.is_some()
@@ -156,7 +170,7 @@ impl CrgGrid {
             || mods.refpoint_v.is_some()
             || mods.refpoint_v_fraction.is_some();
 
-        let dz = if refpoint {
+        let (center, angle, shift, dz) = if refpoint {
             let mut u = mods.refpoint_u.unwrap_or(self.u.first);
             if let Some(fraction) = mods.refpoint_u_fraction {
                 u = self.u.first + fraction * (self.u.last - self.u.first);
@@ -167,22 +181,45 @@ impl CrgGrid {
                 v = self.v.first + fraction * (self.v.last - self.v.first);
                 v += mods.refpoint_v_offset.unwrap_or(0.0);
             }
-            let from = self.raw_elevation(Uv { u, v }, &self.borders);
-            mods.refpoint_z.unwrap_or(0.0) - from.unwrap_or(0.0)
+            let at = Uv { u, v };
+            let from = self.refline.xy(&self.u, at);
+            let from_z = self.raw_elevation(at, &self.borders).unwrap_or(0.0);
+            let from_phi = self.refline.heading(&self.u, at).phi;
+            let shift = Xy {
+                x: mods.refpoint_x.unwrap_or(0.0) - from.x,
+                y: mods.refpoint_y.unwrap_or(0.0) - from.y,
+            };
+            let angle = mods.refpoint_phi.unwrap_or(0.0) - from_phi;
+            (from, angle, shift, mods.refpoint_z.unwrap_or(0.0) - from_z)
         } else if mods.refline_offset_x.is_some()
             || mods.refline_offset_y.is_some()
             || mods.refline_offset_z.is_some()
             || mods.refline_offset_phi.is_some()
         {
+            let from = Xy {
+                x: self.refline.first.x,
+                y: self.refline.first.y,
+            };
+            let center = Xy {
+                x: mods.refline_rotcenter_x.unwrap_or(from.x),
+                y: mods.refline_rotcenter_y.unwrap_or(from.y),
+            };
             // The C-API evaluates without options here, so every border refuses.
-            let from = self
+            let from_z = self
                 .raw_elevation(Uv { u: 0.0, v: 0.0 }, &Borders::REFUSE)
                 .unwrap_or(0.0);
-            (mods.refline_offset_z.unwrap_or(0.0) + from) - from
+            // (offset + from) - from, rounded as the C-API rounds it.
+            let shift = Xy {
+                x: (mods.refline_offset_x.unwrap_or(0.0) + from.x) - from.x,
+                y: (mods.refline_offset_y.unwrap_or(0.0) + from.y) - from.y,
+            };
+            let dz = (mods.refline_offset_z.unwrap_or(0.0) + from_z) - from_z;
+            (center, mods.refline_offset_phi.unwrap_or(0.0), shift, dz)
         } else {
             return;
         };
 
+        self.refline.transform(center, angle, shift);
         match &mut self.ref_z {
             Profile::Nodes(values) => values.iter_mut().for_each(|z| *z += dz),
             Profile::Constant(z) if road.start_z.is_some() => *z += dz,

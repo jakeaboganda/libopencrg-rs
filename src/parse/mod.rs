@@ -28,7 +28,6 @@ pub(crate) struct Parsed {
     /// Grid values, cross-section major: `z[iu * v.len() + iv]`.
     pub z: Vec<f32>,
     /// Heading per cross section. The first value is `REFERENCE_LINE_START_PHI`, not the file's.
-    #[allow(dead_code)] // read by the reference line, which is not built yet
     pub phi: Option<Vec<f64>>,
     pub bank: Option<Vec<f64>>,
     pub slope: Option<Vec<f64>>,

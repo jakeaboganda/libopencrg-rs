@@ -24,6 +24,24 @@ pub struct GridSample {
     pub dz_dv: f64,
 }
 
+/// Heading of the reference line and curvature at a grid position.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Heading {
+    /// Heading of the reference-line segment, counter-clockwise from the x axis, in radians.
+    pub phi: f64,
+    /// Curvature of the line at offset v from the reference line, in 1/m; positive to the
+    /// left.
+    pub curvature: f64,
+}
+
+/// Unit surface normal in the global frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Normal {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
 /// Settings the caller chooses at load. Each value that the file's `$ROAD_CRG_OPTS` block
 /// sets overrides the one here.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -5,8 +5,14 @@ use std::path::{Path, PathBuf};
 
 use opencrg::{BorderMode, CrgGrid, LoadOptions, Uv};
 
-/// Absolute tolerance for elevations [m].
-const Z_TOLERANCE: f64 = 1e-9;
+/// Absolute tolerance for elevations and positions, in metres.
+const TOLERANCE: f64 = 1e-9;
+/// Relative tolerance for heading and curvature.
+const RELATIVE: f64 = 1e-12;
+
+fn close(got: f64, want: f64, tolerance: f64) -> bool {
+    got == want || (got - want).abs() <= tolerance
+}
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -78,7 +84,7 @@ fn check_case(path: &Path) -> Vec<String> {
                     _ => Some(expected.parse::<f64>().unwrap()).filter(|z| !z.is_nan()),
                 };
                 let ok = match (got, want) {
-                    (Some(got), Some(want)) => (got - want).abs() <= Z_TOLERANCE,
+                    (Some(got), Some(want)) => close(got, want, TOLERANCE),
                     (None, None) => true,
                     _ => false,
                 };
@@ -86,8 +92,27 @@ fn check_case(path: &Path) -> Vec<String> {
                     failures.push(format!("{query}: got {got:?}, want {want:?}"));
                 }
             }
-            // Checked once the reference line is implemented.
-            "xy" | "pk" => {}
+            "xy" => {
+                let got = grid.xy_from_uv(Uv {
+                    u: args[0],
+                    v: args[1],
+                });
+                let want = numbers(expected);
+                if !(close(got.x, want[0], TOLERANCE) && close(got.y, want[1], TOLERANCE)) {
+                    failures.push(format!("{query}: got {got:?}, want {want:?}"));
+                }
+            }
+            "pk" => {
+                let got = grid.heading_at_uv(Uv {
+                    u: args[0],
+                    v: args[1],
+                });
+                let want = numbers(expected);
+                let relative = |got: f64, want: f64| close(got, want, RELATIVE * want.abs());
+                if !(relative(got.phi, want[0]) && relative(got.curvature, want[1])) {
+                    failures.push(format!("{query}: got {got:?}, want {want:?}"));
+                }
+            }
             _ => panic!("unknown command {command}"),
         }
     }

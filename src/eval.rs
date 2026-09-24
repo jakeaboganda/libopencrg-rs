@@ -1,7 +1,7 @@
 //! Elevation queries, following `crgDataEvaluv2z` (crgEvalz.c:64).
 
 use crate::grid::CrgGrid;
-use crate::{BorderMode, GridSample, Uv};
+use crate::{BorderMode, GridSample, Heading, Normal, Uv, Xy};
 
 /// Border handling for both axes.
 #[derive(Clone, Copy, Debug)]
@@ -81,6 +81,69 @@ impl CrgGrid {
     pub fn elevation_at_uv(&self, uv: Uv) -> Option<f64> {
         self.raw_elevation(uv, &self.borders)
             .filter(|z| !z.is_nan())
+    }
+
+    /// Global position of a grid position. Beyond either end of the reference line, the line
+    /// continues straight along its end heading.
+    #[inline]
+    pub fn xy_from_uv(&self, uv: Uv) -> Xy {
+        self.refline.xy(&self.u, uv)
+    }
+
+    /// Heading of the reference line at `uv.u`, and curvature of the line through `uv`
+    /// parallel to it. The C-API measures curvature over sections of at least 0.5 m and
+    /// reports 0 within that distance of either end.
+    #[inline]
+    pub fn heading_at_uv(&self, uv: Uv) -> Heading {
+        self.refline.heading(&self.u, uv)
+    }
+
+    /// Unit surface normal at `uv` in the global frame, from the slopes of
+    /// [`elevation_at_uv`](Self::elevation_at_uv) within the evaluated cell. Returns `None`
+    /// where the elevation is `None`, and where `uv` lies at or beyond the reference line's
+    /// centre of curvature, where the grid folds over itself.
+    pub fn normal_at_uv(&self, uv: Uv) -> Option<Normal> {
+        let cell = self.locate(uv, &self.borders)?;
+        let (mut dz_du, mut dz_dv) = (0.0, 0.0);
+        if cell.grid {
+            let (c, d10, d01, z00) = self.corners(&cell);
+            if ((c * cell.fv + d10) * cell.fu + d01 * cell.fv + z00).is_nan() {
+                return None;
+            }
+            dz_du = (c * cell.fv + d10) * cell.su;
+            dz_dv = (c * cell.fu + d01) * cell.sv;
+        }
+        dz_du += self.ref_z.step(cell.iu) * cell.su;
+        if let Some(bank) = &self.bank
+            && cell.bank
+        {
+            let v = uv.v.clamp(self.v.first, self.v.last);
+            dz_du += bank.step(cell.iu) * cell.su * v;
+            if v == uv.v {
+                dz_dv += bank.at(cell.iu, cell.fu);
+            }
+        }
+        if cell.border == Border::Replace {
+            (dz_du, dz_dv) = (0.0, 0.0);
+        }
+
+        let reference = self.refline.reference_heading(&self.u, uv.u);
+        let s = 1.0 - uv.v * reference.curvature;
+        if s <= 0.0 || s.is_nan() {
+            return None;
+        }
+        let (sin, cos) = reference.phi.sin_cos();
+        let n = [
+            s * sin * dz_dv - cos * dz_du,
+            -sin * dz_du - s * cos * dz_dv,
+            s,
+        ];
+        let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        Some(Normal {
+            x: n[0] / length,
+            y: n[1] / length,
+            z: n[2] / length,
+        })
     }
 
     /// Elevation exactly as the C-API computes it, NaN included.
@@ -333,6 +396,69 @@ mod tests {
             unsupported("$ROAD_CRG_MODS\nscale_z_grid = 2"),
             "scaling modifiers"
         );
+    }
+
+    /// Largest distance between `normal_at_uv` and the normal of the surface traced by
+    /// `xy_from_uv` and `elevation_at_uv`, from central differences.
+    fn normal_error(name: &str) -> f64 {
+        let grid = CrgGrid::from_bytes(&fixture(name)).unwrap();
+        let point = |u, v| {
+            let xy = grid.xy_from_uv(uv(u, v));
+            [xy.x, xy.y, grid.elevation_at_uv(uv(u, v)).unwrap()]
+        };
+        let h = 1e-6;
+        let mut worst: f64 = 0.0;
+        for (u, v) in [
+            (7.3, 0.2),
+            (12.6, -1.2),
+            (15.25, 1.3),
+            (3.7, 0.7),
+            (18.1, -0.4),
+        ] {
+            let (a, b) = (point(u + h, v), point(u - h, v));
+            let (c, d) = (point(u, v + h), point(u, v - h));
+            let tu: [f64; 3] = std::array::from_fn(|i| (a[i] - b[i]) / (2.0 * h));
+            let tv: [f64; 3] = std::array::from_fn(|i| (c[i] - d[i]) / (2.0 * h));
+            let n = [
+                tu[1] * tv[2] - tu[2] * tv[1],
+                tu[2] * tv[0] - tu[0] * tv[2],
+                tu[0] * tv[1] - tu[1] * tv[0],
+            ];
+            let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            let got = grid.normal_at_uv(uv(u, v)).unwrap();
+            let error = ((got.x - n[0] / length).powi(2)
+                + (got.y - n[1] / length).powi(2)
+                + (got.z - n[2] / length).powi(2))
+            .sqrt();
+            worst = worst.max(error);
+        }
+        worst
+    }
+
+    #[test]
+    fn normals_match_the_surface() {
+        // Exact on straight lines, up to rounding in the differences.
+        assert!(normal_error("handmade_sloped.crg") < 1e-9);
+        assert!(normal_error("handmade_banked.crg") < 1e-9);
+        // On curves the C-API's xy mapping is piecewise linear with mitred offsets, while
+        // the normal uses the heading and curvature of `heading_at_uv`.
+        assert!(normal_error("handmade_curved_banked_sloped.crg") < 5e-4);
+        assert!(normal_error("handmade_circle.crg") < 5e-4);
+    }
+
+    #[test]
+    fn normal_on_a_flat_straight_road_points_up() {
+        let grid = CrgGrid::from_bytes(&fixture("handmade_straight.crg")).unwrap();
+        // Cross section 0 is flat at v = 0.
+        let n = grid.normal_at_uv(uv(0.5, 0.0)).unwrap();
+        assert!((n.x.powi(2) + n.y.powi(2) + n.z.powi(2) - 1.0).abs() < 1e-15);
+        assert!(n.z > 0.99);
+        // Beyond the centre of curvature there is no normal.
+        let circle = CrgGrid::from_bytes(&fixture("handmade_circle.crg")).unwrap();
+        let heading = circle.heading_at_uv(uv(10.0, 0.0));
+        assert!(heading.curvature > 0.0);
+        let beyond = 1.0 / heading.curvature + 1.0;
+        assert_eq!(circle.normal_at_uv(uv(10.0, beyond)), None);
     }
 
     #[test]

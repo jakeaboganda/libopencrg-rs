@@ -8,8 +8,9 @@ mod error;
 mod eval;
 mod grid;
 mod parse;
+mod refline;
 mod types;
 
 pub use error::Error;
 pub use grid::CrgGrid;
-pub use types::{BorderMode, GridSample, LoadOptions, Uv, Xy};
+pub use types::{BorderMode, GridSample, Heading, LoadOptions, Normal, Uv, Xy};

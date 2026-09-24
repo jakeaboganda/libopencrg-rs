@@ -1,0 +1,33 @@
+# Recorded oracle cases: name, fixture under tests/fixtures, then load options.
+# Options set contact-point options in the C-API and LoadOptions in the crate; a case must
+# not set an option that the file's $ROAD_CRG_OPTS block also sets.
+#
+# name                  fixture                                    options
+arc                     crg-txt/handmade_arc.crg
+banked                  crg-txt/handmade_banked.crg
+circle                  crg-txt/handmade_circle.crg
+curved                  crg-txt/handmade_curved.crg
+curved_banked_sloped    crg-txt/handmade_curved_banked_sloped.crg
+curved_minimalist       crg-txt/handmade_curved_minimalist.crg
+platform                crg-txt/handmade_platform.crg
+sloped                  crg-txt/handmade_sloped.crg
+sloped_opts             crg-txt/handmade_sloped_opts.crg
+straight                crg-txt/handmade_straight.crg
+straight_double         crg-txt/handmade_straight_double.crg
+straight_minimalist     crg-txt/handmade_straight_minimalist.crg
+vtest                   crg-txt/handmade_vtest.crg
+belgian_block           crg-bin/belgian_block.crg
+straight_none           crg-txt/handmade_straight.crg              border_mode_u=0 border_mode_v=0
+straight_zero           crg-txt/handmade_straight.crg              border_mode_u=1 border_mode_v=1 border_offset_u=0.25 border_offset_v=-0.5
+straight_zero_u         crg-txt/handmade_straight.crg              border_mode_u=1 border_offset_v=-0.5
+straight_zero_v         crg-txt/handmade_straight.crg              border_mode_v=1 border_offset_u=0.25
+straight_offsets        crg-txt/handmade_straight.crg              border_offset_u=0.25 border_offset_v=-0.5
+banked_zero_v           crg-txt/handmade_banked.crg                border_mode_v=1 border_offset_u=0.25
+curved_zero             crg-txt/handmade_curved_banked_sloped.crg  border_mode_u=1 border_mode_v=1 border_offset_v=0.5
+curved_none             crg-txt/handmade_curved_banked_sloped.crg  border_mode_u=0 border_mode_v=0
+curved_none_v           crg-txt/handmade_curved.crg                border_mode_v=0 border_offset_u=0.25
+# Large binaries: fetch with tools/fetch-large-fixtures.sh.
+country_road            large/country_road.crg
+local_curv_ok           large/crg_local_curv_test_ok.crg
+local_curv_fail         large/crg_local_curv_test_fail.crg
+hoki_grafing            large/crg_refline_Hoki_HoeKi_Grafing.crg

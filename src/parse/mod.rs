@@ -6,7 +6,7 @@ mod header;
 
 use data::{Format, decode_records, split_line};
 use header::c_atof;
-pub(crate) use header::{Mods, Options, Road};
+pub(crate) use header::{Mods, NanMode, Options, Road};
 
 use crate::Error;
 
@@ -28,6 +28,7 @@ pub(crate) struct Parsed {
     /// Grid values, cross-section major: `z[iu * v.len() + iv]`.
     pub z: Vec<f32>,
     /// Heading per cross section. The first value is `REFERENCE_LINE_START_PHI`, not the file's.
+    #[allow(dead_code)] // read by the reference line, which is not built yet
     pub phi: Option<Vec<f64>>,
     pub bank: Option<Vec<f64>>,
     pub slope: Option<Vec<f64>>,

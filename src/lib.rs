@@ -5,9 +5,11 @@
 //! design and its deliberate differences from the C-API.
 
 mod error;
-#[allow(dead_code)]
+mod eval;
+mod grid;
 mod parse;
 mod types;
 
 pub use error::Error;
-pub use types::BorderMode;
+pub use grid::CrgGrid;
+pub use types::{BorderMode, GridSample, LoadOptions, Uv, Xy};

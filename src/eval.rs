@@ -215,9 +215,7 @@ impl CrgGrid {
         if SLOPES {
             dz_du += self.ref_z.step(cell.iu) * cell.su;
         }
-        if let Some(bank) = &self.bank
-            && cell.bank
-        {
+        if let (Some(bank), true) = (&self.bank, cell.bank) {
             let v = cell.bank_v.clamp(self.v.first, self.v.last);
             let b = bank.at(cell.iu, cell.fu);
             z += b * v;
@@ -256,18 +254,14 @@ impl CrgGrid {
         let (first, last) = (self.u.first, self.u.last);
         let mut zone = None;
         if cell.in_u || cell.smooth_side.is_some() {
-            if let Some(length) = borders.smooth_begin
-                && cell.u - first <= length
-            {
+            if let Some(length) = borders.smooth_begin.filter(|&l| cell.u - first <= l) {
                 zone = Some(if cell.u < first {
                     (Side::Begin, 0.0, 0.0)
                 } else {
                     (Side::Begin, (cell.u - first) / length, cell.u_sign / length)
                 });
             }
-            if let Some(length) = borders.smooth_end
-                && last - cell.u <= length
-            {
+            if let Some(length) = borders.smooth_end.filter(|&l| last - cell.u <= l) {
                 zone = Some(if cell.u > last {
                     (Side::End, 0.0, 0.0)
                 } else {

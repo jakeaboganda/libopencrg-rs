@@ -90,6 +90,45 @@ impl CrgGrid {
         self.refline.xy(&self.u, uv)
     }
 
+    /// Grid position of a global position, as the C-API finds it with an empty search
+    /// history: start from the nearest of every tenth reference-line node, then walk to the
+    /// segment whose mitred normals enclose `xy`. Beyond either end, u and v are measured
+    /// along the end heading. Returns `None` for non-finite input or a degenerate segment.
+    ///
+    /// Where the grid overlaps itself, several positions map to `xy` and the search returns
+    /// one of them; which one depends on the start node.
+    pub fn uv_from_xy(&self, xy: Xy) -> Option<Uv> {
+        let start = self.refline.coarse_index(xy);
+        self.finite_uv(xy, start)
+    }
+
+    /// Like [`uv_from_xy`](Self::uv_from_xy), but starts the search at `hint`, typically the
+    /// previous result for a moving point. This is much faster on long roads and stays on the
+    /// same branch where the grid overlaps itself. A hint whose position is 2.2 m or more
+    /// from `xy` is ignored, as the C-API ignores history that far away.
+    pub fn uv_from_xy_near(&self, xy: Xy, hint: Uv) -> Option<Uv> {
+        let from = self.xy_from_uv(hint);
+        let (dx, dy) = (xy.x - from.x, xy.y - from.y);
+        // The C-API's default dCrgCpOptionRefLineFar, squared.
+        let far = 2.2 * 2.2;
+        let start = if dx * dx + dy * dy < far {
+            // The C-API remembers the node after the segment it found.
+            let segment = ((hint.u - self.u.first) / self.u.inc).floor();
+            (segment.clamp(0.0, (self.u.n - 2) as f64) as usize + 2).min(self.u.n - 1)
+        } else {
+            self.refline.coarse_index(xy)
+        };
+        self.finite_uv(xy, start)
+    }
+
+    fn finite_uv(&self, xy: Xy, start: usize) -> Option<Uv> {
+        if !(xy.x.is_finite() && xy.y.is_finite()) {
+            return None;
+        }
+        let uv = self.refline.uv(&self.u, xy, start);
+        (uv.u.is_finite() && uv.v.is_finite()).then_some(uv)
+    }
+
     /// Heading of the reference line at `uv.u`, and curvature of the line through `uv`
     /// parallel to it. The C-API measures curvature over sections of at least 0.5 m and
     /// reports 0 within that distance of either end.
@@ -459,6 +498,27 @@ mod tests {
         assert!(heading.curvature > 0.0);
         let beyond = 1.0 / heading.curvature + 1.0;
         assert_eq!(circle.normal_at_uv(uv(10.0, beyond)), None);
+    }
+
+    #[test]
+    fn xy_to_uv_round_trips() {
+        let grid = CrgGrid::from_bytes(&fixture("handmade_curved_banked_sloped.crg")).unwrap();
+        let mut hint = uv(0.0, 0.0);
+        for i in 0..=40 {
+            let want = uv(0.5 * i as f64, 1.2 * (0.3 * i as f64).sin());
+            let xy = grid.xy_from_uv(want);
+            for got in [grid.uv_from_xy(xy), grid.uv_from_xy_near(xy, hint)] {
+                let got = got.unwrap();
+                assert!((got.u - want.u).abs() < 1e-9 && (got.v - want.v).abs() < 1e-9);
+            }
+            hint = want;
+        }
+        let nan = Xy {
+            x: f64::NAN,
+            y: 0.0,
+        };
+        assert_eq!(grid.uv_from_xy(nan), None);
+        assert_eq!(grid.uv_from_xy_near(nan, hint), None);
     }
 
     #[test]

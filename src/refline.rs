@@ -1,6 +1,6 @@
 //! The reference line in the global frame: node positions from integrated headings
 //! (`calcRefLine`, crgLoader.c:2109), uv to xy (crgEvaluv2xy.c:55), and heading and
-//! curvature (crgEvalpk.c).
+//! curvature (crgEvalpk.c), and xy to uv (crgEvalxy2uv.c).
 
 use crate::grid::UAxis;
 use crate::parse::Road;
@@ -14,6 +14,9 @@ pub(crate) struct RefLine {
     pub phi: Vec<f64>,
     pub first: End,
     pub last: End,
+    /// Whether the C-API treats the line as possibly closed, which lets the xy to uv search
+    /// wrap from one end to the other.
+    pub closed: bool,
 }
 
 /// Position and heading used beyond either end of the reference line.
@@ -94,13 +97,29 @@ impl RefLine {
         let phi1 = road
             .end_phi
             .unwrap_or_else(|| phi.last().copied().unwrap_or(phi0));
-        RefLine {
+        let mut line = RefLine {
             first: End::new(x0, y0, phi0),
             last: End::new(x1, y1, phi1),
             x,
             y,
             phi,
+            closed: false,
+        };
+        line.closed = line.is_closed();
+        line
+    }
+
+    /// The closed-line test of `crgCalcUtilityData` (crgStatistics.c:238): the end
+    /// directions are less than 60 degrees apart and each end lies behind the other.
+    fn is_closed(&self) -> bool {
+        let (a, b) = (&self.first, &self.last);
+        let divisor = a.cos * b.cos + a.sin * b.sin;
+        if divisor <= 0.5 {
+            return false;
         }
+        let l = ((a.y - b.y) * a.sin + (a.x - b.x) * a.cos) / divisor;
+        let k = ((b.y - a.y) * b.sin + (b.x - a.x) * b.cos) / divisor;
+        l > 0.0 && k < 0.0
     }
 
     /// Rotates by `angle` around `center`, then translates by `shift`, as
@@ -116,6 +135,121 @@ impl RefLine {
             rotate(x, y, center, angle);
             *x += shift.x;
             *y += shift.y;
+        }
+        self.closed = self.is_closed();
+    }
+
+    /// Search start for a point with no usable hint: the nearest of every tenth node and the
+    /// last node.
+    pub fn coarse_index(&self, xy: Xy) -> usize {
+        let n = self.x.len();
+        let (mut best, mut best_dist2) = (0, 0.0);
+        let mut i = 0;
+        loop {
+            let (dx, dy) = (xy.x - self.x[i], xy.y - self.y[i]);
+            let dist2 = dx * dx + dy * dy;
+            if dist2 < best_dist2 || i == 0 {
+                best = i;
+                best_dist2 = dist2;
+            }
+            if i + 10 < n {
+                i += 10;
+            } else if i < n - 1 {
+                i = n - 1;
+            } else {
+                return best;
+            }
+        }
+    }
+
+    /// Grid position of a global position, searching from node `start` (crgEvalxy2uv.c:48).
+    pub fn uv(&self, u: &UAxis, xy: Xy, start: usize) -> Uv {
+        let (x, y) = (xy.x, xy.y);
+        let (px, py) = (&self.x, &self.y);
+        let n = px.len();
+        let mut index = start.max(1);
+
+        // Walk up while P lies ahead of the normal through node `index`.
+        let mut wrap_dot = 0.0;
+        let mut wrapped = false;
+        loop {
+            let next = (index + 1).min(n - 1);
+            let dot = (x - px[index]) * (px[next] - px[index - 1])
+                + (y - py[index]) * (py[next] - py[index - 1]);
+            if dot <= 0.0 || dot.is_nan() {
+                break;
+            }
+            if index < n - 1 {
+                index += 1;
+            } else if self.closed && !wrapped {
+                wrap_dot = (x - px[0]) * (px[1] - px[0]) + (y - py[0]) * (py[1] - py[0]);
+                if wrap_dot <= 0.0 {
+                    break;
+                }
+                // The C-API would walk round again forever; one wrap is enough.
+                wrapped = true;
+                index = 1;
+            } else {
+                break;
+            }
+        }
+
+        // Then walk down until P lies ahead of the normal through node `index - 1`.
+        let (mut p0, mut p1, mut p2);
+        let mut dot;
+        loop {
+            let i0 = index.saturating_sub(2);
+            p0 = [px[i0], py[i0]];
+            p1 = [px[index - 1], py[index - 1]];
+            p2 = [px[index], py[index]];
+            dot = (x - p1[0]) * (p2[0] - p0[0]) + (y - p1[1]) * (p2[1] - p0[1]);
+            if dot >= 0.0 || dot.is_nan() {
+                break;
+            }
+            if index > 1 {
+                index -= 1;
+            } else if self.closed {
+                if wrap_dot != 0.0 {
+                    break;
+                }
+                let last = n - 1;
+                wrap_dot = (x - px[last]) * (px[last] - px[last - 1])
+                    + (y - py[last]) * (py[last] - py[last - 1]);
+                if wrap_dot >= 0.0 {
+                    break;
+                }
+                index = last;
+            } else {
+                break;
+            }
+        }
+
+        // v is the signed distance from P1P2; u interpolates between the mitred normals
+        // through P1 and P2.
+        let d21 = [p2[0] - p1[0], p2[1] - p1[1]];
+        let d1 = [x - p1[0], y - p1[1]];
+        let v = (d21[0] * d1[1] - d21[1] * d1[0]) / (d21[0] * d21[0] + d21[1] * d21[1]).sqrt();
+        let i3 = (index + 1).min(n - 1);
+        let d31 = [px[i3] - p1[0], py[i3] - p1[1]];
+        let d20 = [p2[0] - p0[0], p2[1] - p0[1]];
+        let ta = dot / (d20[0] * d21[0] + d20[1] * d21[1]);
+        let tb =
+            (d31[0] * (p2[0] - x) + d31[1] * (p2[1] - y)) / (d31[0] * d21[0] + d31[1] * d21[1]);
+        let du = ta / (ta + tb) * u.inc;
+        let at = (index - 1) as f64 * u.inc + du + u.first;
+
+        let end = if at < u.first {
+            (&self.first, u.first)
+        } else if at > u.last {
+            (&self.last, u.last)
+        } else {
+            return Uv { u: at, v };
+        };
+        let (e, u0) = end;
+        let (dx, dy) = (x - e.x, y - e.y);
+        Uv {
+            u: u0 + dx * e.cos + dy * e.sin,
+            v: dy * e.cos - dx * e.sin,
         }
     }
 

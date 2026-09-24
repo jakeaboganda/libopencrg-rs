@@ -7,8 +7,12 @@ use opencrg::{BorderMode, CrgGrid, LoadOptions, Uv, Xy};
 
 /// Absolute tolerance for elevations and positions, in metres.
 const TOLERANCE: f64 = 1e-9;
-/// Relative tolerance for heading and curvature.
+/// Relative tolerance for heading.
 const RELATIVE: f64 = 1e-12;
+/// Absolute tolerance for curvature, per metre. Curvature divides differences of node
+/// positions by the square of a 0.5 m section, so last-bit differences in `sin` and `cos`,
+/// as between glibc and the wasm math library, reach 1e-10.
+const CURVATURE: f64 = 1e-9;
 
 fn close(got: f64, want: f64, tolerance: f64) -> bool {
     got == want || (got - want).abs() <= tolerance
@@ -135,8 +139,10 @@ fn check_case(path: &Path) -> Vec<String> {
                     v: args[1],
                 });
                 let want = numbers(expected);
-                let relative = |got: f64, want: f64| close(got, want, RELATIVE * want.abs());
-                if !(relative(got.phi, want[0]) && relative(got.curvature, want[1])) {
+                let curvature = CURVATURE.max(RELATIVE * want[1].abs());
+                if !(close(got.phi, want[0], RELATIVE * want[0].abs())
+                    && close(got.curvature, want[1], curvature))
+                {
                     failures.push(format!("{query}: got {got:?}, want {want:?}"));
                 }
             }

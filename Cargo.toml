@@ -5,8 +5,16 @@ edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 description = "Reader and evaluator for ASAM OpenCRG road surface files"
+repository = "https://github.com/jakeaboganda/libopencrg-rs"
 categories = ["parser-implementations", "science::geo", "simulation"]
 keywords = ["opencrg", "road", "asam", "simulation", "elevation"]
-include = ["src/**", "Cargo.toml", "README.md", "LICENSE*"]
+include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE*"]
 
 [dependencies]
+
+[lib]
+bench = false
+
+[[bench]]
+name = "eval"
+harness = false

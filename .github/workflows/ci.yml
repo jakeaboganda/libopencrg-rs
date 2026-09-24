@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.85 is the rust-version in Cargo.toml.
+        toolchain: [stable, "1.85"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - run: cargo test
+      - run: cargo build --benches
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # Runs every test under WASI, including the recorded C-API results, since wasm has its
+  # own math library.
+  wasm:
+    runs-on: ubuntu-latest
+    env:
+      WASMTIME: v49.0.1
+      CARGO_TARGET_WASM32_WASIP1_RUNNER: >-
+        wasmtime run --dir ${{ github.workspace }} --env CARGO_MANIFEST_DIR
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+          components: clippy
+      - run: cargo build --release --target wasm32-unknown-unknown
+      - run: cargo clippy --target wasm32-unknown-unknown
+      - run: |
+          name=wasmtime-$WASMTIME-x86_64-linux
+          releases=https://github.com/bytecodealliance/wasmtime/releases/download
+          curl -fsSL "$releases/$WASMTIME/$name.tar.xz" | tar xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: tests/fixtures/large
+          key: large-fixtures-${{ hashFiles('tools/fetch-large-fixtures.sh') }}
+      - run: tools/fetch-large-fixtures.sh
+      - run: cargo test --release --target wasm32-wasip1 -- --include-ignored
+
+  large-fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: tests/fixtures/large
+          key: large-fixtures-${{ hashFiles('tools/fetch-large-fixtures.sh') }}
+      - run: tools/fetch-large-fixtures.sh
+      - run: cargo test --release -- --include-ignored
+
+  # Rebuilds the C-API, records it again, and checks the crate against the fresh results.
+  # Byte differences from the committed files are shown but allowed: another libm may
+  # round sin or atan2 differently in the last bit.
+  oracle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: tests/fixtures/large
+          key: large-fixtures-${{ hashFiles('tools/fetch-large-fixtures.sh') }}
+      - run: tools/fetch-large-fixtures.sh
+      - run: |
+          cmake -S tools/oracle -B target/oracle -DCMAKE_BUILD_TYPE=Release
+          cmake --build target/oracle
+      - run: tools/oracle/record.sh
+      - run: git status --short -- tests/oracle && git diff --stat -- tests/oracle
+      - run: cargo test --release --test oracle -- --include-ignored

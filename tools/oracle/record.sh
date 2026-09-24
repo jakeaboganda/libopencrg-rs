@@ -7,7 +7,8 @@
 #   cmake -S tools/oracle -B target/oracle -DCMAKE_BUILD_TYPE=Release
 #   cmake --build target/oracle
 #
-# Each output line is "QUERY = RESULT". Cases whose fixture is missing are skipped.
+# Each output line is "QUERY = RESULT". Cases whose fixture is missing are skipped. The
+# oracle runs in the fixture's directory, where the C-API resolves relative include names.
 #
 # Options named header_KEY and mod_KEY go into a $ROAD_CRG or $ROAD_CRG_MODS block that is
 # prepended to the fixture; tests/oracle.rs builds the same text.
@@ -19,10 +20,16 @@ set -eu
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 oracle=${1:-$root/target/oracle/crg-oracle}
+case $oracle in /*) ;; *) oracle=$PWD/$oracle ;; esac
 out=$root/tests/oracle
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$out"
+
+# Runs the oracle on $file from the file's directory.
+run() {
+    (cd "$(dirname "$file")" && "$oracle" "$file" 2>/dev/null)
+}
 
 grep -v '^#' "$root/tools/oracle/cases.txt" | while read -r name fixture options; do
     [ -n "$name" ] || continue
@@ -62,11 +69,11 @@ grep -v '^#' "$root/tools/oracle/cases.txt" | while read -r name fixture options
     # The seed depends only on the name, so reordering cases changes nothing.
     seed=$(printf '%s' "$name" | cksum | cut -d' ' -f1)
     seed=$((seed % 2147483646 + 1))
-    echo range | "$oracle" "$file" 2>/dev/null >"$tmp/range"
+    echo range | run >"$tmp/range"
     awk -v seed="$seed" -f "$root/tools/oracle/queries.awk" "$tmp/range" >"$tmp/queries"
     { echo range; cat "$tmp/queries"; } >"$tmp/all"
 
-    cat "$tmp/settings" "$tmp/all" | "$oracle" "$file" 2>/dev/null \
+    cat "$tmp/settings" "$tmp/all" | run \
         | tail -n +$(($(wc -l <"$tmp/settings") + 1)) >"$tmp/results"
 
     paste -d' ' "$tmp/all" "$tmp/results" | awk '
@@ -80,7 +87,7 @@ grep -v '^#' "$root/tools/oracle/cases.txt" | while read -r name fixture options
                 print "reset"; print "uv " bx " " by
             }
         }' >"$tmp/uv"
-    "$oracle" "$file" <"$tmp/uv" 2>/dev/null >"$tmp/uv_results"
+    run <"$tmp/uv" >"$tmp/uv_results"
     cat "$tmp/uv" >>"$tmp/all"
     cat "$tmp/uv_results" >>"$tmp/results"
     {

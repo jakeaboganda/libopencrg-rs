@@ -40,8 +40,7 @@ fn check_case(path: &Path) -> Vec<String> {
     let text = fs::read_to_string(path).unwrap();
     let mut lines = text.lines().filter(|l| !l.starts_with('#'));
     let fixture = lines.next().unwrap().strip_prefix("fixture ").unwrap();
-    let mut bytes = fs::read(root().join("tests/fixtures").join(fixture))
-        .unwrap_or_else(|e| panic!("{fixture}: {e}"));
+    let path = root().join("tests/fixtures").join(fixture);
     // header_KEY and mod_KEY options become blocks in front of the file, as in record.sh.
     let (mut header, mut mods) = (String::new(), String::new());
 
@@ -72,20 +71,23 @@ fn check_case(path: &Path) -> Vec<String> {
             }
             continue;
         }
-        if !(header.is_empty() && mods.is_empty()) {
-            let mut prefix = String::new();
-            if !header.is_empty() {
-                prefix += &format!("$ROAD_CRG\n{header}$!\n");
-            }
-            if !mods.is_empty() {
-                prefix += &format!("$ROAD_CRG_MODS\n{mods}$!\n");
-            }
-            bytes.splice(0..0, prefix.into_bytes());
-            (header, mods) = (String::new(), String::new());
-        }
+
         let grid = grid.get_or_insert_with(|| {
-            CrgGrid::from_bytes_with_options(&bytes, &options)
-                .unwrap_or_else(|e| panic!("{fixture}: {e}"))
+            let loaded = if header.is_empty() && mods.is_empty() {
+                CrgGrid::from_path_with_options(&path, &options)
+            } else {
+                let mut bytes = String::new();
+                if !header.is_empty() {
+                    bytes += &format!("$ROAD_CRG\n{header}$!\n");
+                }
+                if !mods.is_empty() {
+                    bytes += &format!("$ROAD_CRG_MODS\n{mods}$!\n");
+                }
+                let mut bytes = bytes.into_bytes();
+                bytes.extend(fs::read(&path).unwrap_or_else(|e| panic!("{fixture}: {e}")));
+                CrgGrid::from_bytes_with_options(&bytes, &options)
+            };
+            loaded.unwrap_or_else(|e| panic!("{fixture}: {e}"))
         });
         let (query, expected) = line.split_once(" = ").unwrap();
         let (command, args) = query.split_once(' ').unwrap_or((query, ""));

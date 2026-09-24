@@ -1,6 +1,10 @@
 //! Builds a [`CrgGrid`] from parsed file contents, following `crgLoaderPrepareData` and
 //! `crgDataSetModifiersApply` of the C-API.
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::{env, fs, io};
+
 use crate::eval::Borders;
 use crate::parse::{self, Mods, NanMode, Parsed, Road};
 use crate::refline::RefLine;
@@ -79,14 +83,71 @@ impl CrgGrid {
     /// Loads a `.crg` file from memory.
     ///
     /// Files that include other files (`$ROAD_CRG_FILE`) fail with
-    /// [`Error::IncludeUnsupported`].
+    /// [`Error::IncludeUnsupported`]; use [`from_bytes_with`](Self::from_bytes_with) or
+    /// [`from_path`](Self::from_path) for those.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         Self::from_bytes_with_options(bytes, &LoadOptions::default())
     }
 
     /// Loads a `.crg` file from memory with caller-chosen border handling.
     pub fn from_bytes_with_options(bytes: &[u8], options: &LoadOptions) -> Result<Self, Error> {
-        Self::build(parse::parse(bytes)?, options)
+        let parsed = parse::parse(bytes, &mut |_: &[String]| Err(Error::IncludeUnsupported))?;
+        Self::build(parsed, options)
+    }
+
+    /// Loads a `.crg` file from memory, calling `loader` for each file it includes, at any
+    /// depth. The loader receives the name exactly as the `$ROAD_CRG_FILE` section writes
+    /// it, with lines joined and `$VARIABLE` references left in place; resolving it is up
+    /// to the loader. Includes nested more than eight levels deep fail.
+    pub fn from_bytes_with<F>(
+        bytes: &[u8],
+        options: &LoadOptions,
+        mut loader: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnMut(&str) -> io::Result<Vec<u8>>,
+    {
+        let mut include = |chain: &[String]| {
+            let name = &chain[chain.len() - 1];
+            loader(name).map_err(|e| Error::io(name.as_str(), &e))
+        };
+        Self::build(parse::parse(bytes, &mut include)?, options)
+    }
+
+    /// Loads a `.crg` file and the files it includes from disk.
+    ///
+    /// An include name has each `$VARIABLE` replaced by that environment variable, up to
+    /// the next `/`. A relative name is resolved against the directory of the file that
+    /// includes it; the C-API resolves it against the working directory instead. A file
+    /// that includes itself fails with [`Error::IncludeCycle`].
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
+        Self::from_path_with_options(path, &LoadOptions::default())
+    }
+
+    /// [`from_path`](Self::from_path) with caller-chosen border handling.
+    pub fn from_path_with_options(
+        path: impl AsRef<Path>,
+        options: &LoadOptions,
+    ) -> Result<Self, Error> {
+        let top = path.as_ref();
+        let io_error = |path: &Path, e: io::Error| Error::io(path.display().to_string(), &e);
+        let bytes = fs::read(top).map_err(|e| io_error(top, e))?;
+        let top_id = fs::canonicalize(top).map_err(|e| io_error(top, e))?;
+        let mut include = |chain: &[String]| {
+            let mut file = top.to_path_buf();
+            let mut seen = vec![top_id.clone()];
+            for name in chain {
+                let dir = file.parent().unwrap_or(Path::new(""));
+                file = dir.join(expand_variables(name)?);
+                let id = fs::canonicalize(&file).map_err(|e| io_error(&file, e))?;
+                if seen.contains(&id) {
+                    return Err(Error::IncludeCycle(file.display().to_string()));
+                }
+                seen.push(id);
+            }
+            fs::read(&file).map_err(|e| io_error(&file, e))
+        };
+        Self::build(parse::parse(&bytes, &mut include)?, options)
     }
 
     fn build(mut p: Parsed, caller: &LoadOptions) -> Result<Self, Error> {
@@ -276,6 +337,27 @@ impl CrgGrid {
     pub fn v_range(&self) -> (f64, f64) {
         (self.v.nodes[0], self.v.nodes[self.v.nodes.len() - 1])
     }
+}
+
+/// Replaces each `$NAME` in an include name, where the name runs to the next `/`, with the
+/// environment variable's value (crgLoader.c:3290).
+fn expand_variables(name: &str) -> Result<PathBuf, Error> {
+    let mut path = OsString::new();
+    let mut rest = name;
+    while let Some(at) = rest.find('$') {
+        path.push(&rest[..at]);
+        let variable = &rest[at + 1..];
+        let end = variable.find('/').unwrap_or(variable.len());
+        let value = env::var_os(&variable[..end]).ok_or_else(|| Error::Io {
+            path: name.to_owned(),
+            kind: io::ErrorKind::NotFound,
+            message: format!("environment variable {} is not set", &variable[..end]),
+        })?;
+        path.push(value);
+        rest = &variable[end..];
+    }
+    path.push(rest);
+    Ok(PathBuf::from(path))
 }
 
 /// A smoothing zone from the file, else from the caller. The C-API ignores zones that are

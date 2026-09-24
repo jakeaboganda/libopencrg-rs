@@ -42,6 +42,7 @@ enum Section {
     Mods,
     Mpro,
     DataDef,
+    File,
 }
 
 #[derive(Clone, Copy)]
@@ -67,110 +68,224 @@ struct DataDef {
     long_sections: Vec<LongSection>,
 }
 
-pub(crate) fn parse(bytes: &[u8]) -> Result<Parsed, Error> {
-    let mut road = Road::default();
-    let mut options = None;
-    let mut mods = None;
-    let mut def = DataDef::default();
-    let mut section = Section::None;
-    let mut pos = 0;
-    let mut line_no = 0;
+/// Deepest include level below the top-level file.
+const MAX_INCLUDE_DEPTH: usize = 8;
 
-    let data_start = loop {
-        if pos >= bytes.len() {
-            return Err(Error::NoData);
-        }
-        let (raw, next) = split_line(bytes, pos);
-        pos = next;
-        line_no += 1;
-        let text = String::from_utf8_lossy(raw);
-        let line = text.as_ref();
-        let syntax = |reason| Error::Syntax {
-            line: line_no,
-            reason,
-        };
+/// Loads an included file. Receives the include names from the top-level file down to the
+/// one to load, as written in each `$ROAD_CRG_FILE` section.
+pub(crate) type Include<'a> = dyn FnMut(&[String]) -> Result<Vec<u8>, Error> + 'a;
 
-        if section == Section::Comment {
-            if line.starts_with('$') {
-                section = Section::None;
+pub(crate) fn parse(bytes: &[u8], include: &mut Include) -> Result<Parsed, Error> {
+    let mut reader = Reader {
+        road: Road::default(),
+        options: None,
+        mods: None,
+        options_level: None,
+        mods_level: None,
+        def: DataDef::default(),
+        data: None,
+        chain: Vec::new(),
+        include,
+    };
+    reader.read(bytes)?;
+    let data = reader.data.ok_or(Error::NoData)?;
+    Ok(Parsed {
+        road: reader.road,
+        options: reader.options,
+        mods: reader.mods,
+        v: data.v,
+        v_from_positions: data.v_from_positions,
+        nu: data.nu,
+        z: data.z,
+        phi: data.phi,
+        bank: data.bank,
+        slope: data.slope,
+    })
+}
+
+/// The data section, decoded with the header values read before it.
+struct Data {
+    v: Vec<f64>,
+    v_from_positions: bool,
+    nu: usize,
+    z: Vec<f32>,
+    phi: Option<Vec<f64>>,
+    bank: Option<Vec<f64>>,
+    slope: Option<Vec<f64>>,
+}
+
+/// State shared by a file and the files it includes, which the C-API reads into one data
+/// set.
+struct Reader<'a, 'b> {
+    road: Road,
+    options: Option<Options>,
+    mods: Option<Mods>,
+    /// Include level of the file whose options or modifiers block is in effect.
+    options_level: Option<usize>,
+    mods_level: Option<usize>,
+    def: DataDef,
+    data: Option<Data>,
+    /// Include names from the top-level file down to the file being read.
+    chain: Vec<String>,
+    include: &'a mut Include<'b>,
+}
+
+impl Reader<'_, '_> {
+    /// Reads one file up to and including its data section.
+    fn read(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let level = self.chain.len();
+        let mut section = Section::None;
+        let mut name = String::new();
+        let mut pos = 0;
+        let mut line_no = 0;
+
+        loop {
+            if pos >= bytes.len() {
+                if section == Section::File {
+                    self.load_include(&name)?;
+                }
+                return Ok(());
             }
-            continue;
-        }
-        if is_comment(line) {
-            continue;
-        }
-        let tag = line.trim_start_matches(' ');
-        if tag.starts_with('$') {
-            if section != Section::None {
-                section = Section::None;
+            let (raw, next) = split_line(bytes, pos);
+            pos = next;
+            line_no += 1;
+            let text = String::from_utf8_lossy(raw);
+            let line = text.as_ref();
+            let syntax = |reason| Error::Syntax {
+                line: line_no,
+                reason,
+            };
+
+            if section == Section::Comment {
+                if line.starts_with('$') {
+                    section = Section::None;
+                }
                 continue;
             }
-            let tag = tag.to_ascii_uppercase();
-            section = if tag.starts_with("$ROAD_CRG_MODS") {
-                mods = Some(Mods::default());
-                Section::Mods
-            } else if tag.starts_with("$ROAD_CRG_OPTS") {
-                options = Some(Options::default());
-                Section::Options
-            } else if tag.starts_with("$ROAD_CRG_FILE") {
-                return Err(Error::IncludeUnsupported);
-            } else if tag.starts_with("$ROAD_CRG_MPRO") {
-                Section::Mpro
-            } else if tag.starts_with("$ROAD_CRG") {
-                Section::Road
-            } else if tag.starts_with("$CT") {
-                Section::Comment
-            } else if tag.starts_with("$KD_DEFINITION") {
-                Section::DataDef
-            } else if tag.starts_with("$$$$") {
-                break pos;
-            } else {
-                Section::None
-            };
-            continue;
+            if is_comment(line) {
+                continue;
+            }
+            let tag = line.trim_start_matches(' ');
+            if section == Section::File {
+                // Only a `$` in the first column ends the section, since a name may start
+                // with an environment variable (crgLoader.c:662).
+                if line.starts_with('$') {
+                    self.load_include(&std::mem::take(&mut name))?;
+                    section = Section::None;
+                } else {
+                    // A name may span lines; each contributes up to a blank or comment.
+                    name.extend(tag.chars().take_while(|&c| c != ' ' && c != '!'));
+                }
+                continue;
+            }
+            if tag.starts_with('$') {
+                if section != Section::None {
+                    section = Section::None;
+                    continue;
+                }
+                let tag = tag.to_ascii_uppercase();
+                section = if tag.starts_with("$ROAD_CRG_MODS") {
+                    if replaces(level, self.mods_level) {
+                        self.mods = Some(Mods::default());
+                        self.mods_level = Some(level);
+                    }
+                    Section::Mods
+                } else if tag.starts_with("$ROAD_CRG_OPTS") {
+                    if replaces(level, self.options_level) {
+                        self.options = Some(Options::default());
+                        self.options_level = Some(level);
+                    }
+                    Section::Options
+                } else if tag.starts_with("$ROAD_CRG_FILE") {
+                    Section::File
+                } else if tag.starts_with("$ROAD_CRG_MPRO") {
+                    Section::Mpro
+                } else if tag.starts_with("$ROAD_CRG") {
+                    Section::Road
+                } else if tag.starts_with("$CT") {
+                    Section::Comment
+                } else if tag.starts_with("$KD_DEFINITION") {
+                    Section::DataDef
+                } else if tag.starts_with("$$$$") {
+                    if self.data.is_some() {
+                        return Err(Error::Invalid("more than one data section"));
+                    }
+                    self.data = Some(self.decode(&bytes[pos..])?);
+                    return Ok(());
+                } else {
+                    Section::None
+                };
+                continue;
+            }
+            match section {
+                Section::Road => self.road.apply(line).map_err(syntax)?,
+                Section::Options if level == 0 || self.options_level == Some(level) => {
+                    let options = self.options.as_mut().unwrap();
+                    options.apply(line).map_err(syntax)?;
+                }
+                Section::Mods if level == 0 || self.mods_level == Some(level) => {
+                    self.mods.as_mut().unwrap().apply(line).map_err(syntax)?;
+                }
+                Section::DataDef => self.def.apply(tag).map_err(|e| match e {
+                    DefError::Syntax(reason) => syntax(reason),
+                    DefError::Unsupported(feature) => Error::Unsupported(feature),
+                })?,
+                _ => {}
+            }
         }
-        match section {
-            Section::Road => road.apply(line).map_err(syntax)?,
-            Section::Options => options.as_mut().unwrap().apply(line).map_err(syntax)?,
-            Section::Mods => mods.as_mut().unwrap().apply(line).map_err(syntax)?,
-            Section::DataDef => def.apply(tag).map_err(|e| match e {
-                DefError::Syntax(reason) => syntax(reason),
-                DefError::Unsupported(feature) => Error::Unsupported(feature),
-            })?,
-            Section::None | Section::Mpro | Section::Comment => {}
+    }
+
+    fn load_include(&mut self, name: &str) -> Result<(), Error> {
+        if name.is_empty() {
+            return Err(Error::Missing("file name in $ROAD_CRG_FILE"));
         }
-    };
-
-    let format = def.format.ok_or(Error::Missing("#: data format"))?;
-    let (v, v_from_positions, z_columns) = long_sections(&road, def.long_sections)?;
-    let nv = v.len();
-
-    let binary_records = if format.ascii {
-        0
-    } else {
-        let end_u = road
-            .end_u
-            .ok_or(Error::Missing("REFERENCE_LINE_END_U for binary data"))?;
-        let steps = (end_u - road.start_u.unwrap_or(0.0)) / road.u_increment.unwrap_or(0.01) + 0.5;
-        if !(steps >= 0.0 && steps.is_finite()) {
-            return Err(Error::Invalid("reference line end_u is before start_u"));
+        if self.chain.len() == MAX_INCLUDE_DEPTH {
+            return Err(Error::IncludeTooDeep);
         }
-        (steps as usize).checked_add(1).ok_or(Error::TooLarge)?
-    };
-    let capacity = binary_records.checked_mul(nv).ok_or(Error::TooLarge)?;
-    let has = |wanted: fn(&Column) -> bool| def.columns.iter().any(wanted);
-    let mut z = Vec::with_capacity(capacity);
-    let mut phi = has(|c| matches!(c, Column::Phi)).then(Vec::new);
-    let mut bank = has(|c| matches!(c, Column::Bank)).then(Vec::new);
-    let mut slope = has(|c| matches!(c, Column::Slope)).then(Vec::new);
-    let start_phi = road.start_phi.unwrap_or(0.0);
+        self.chain.push(name.to_owned());
+        let bytes = (self.include)(&self.chain)?;
+        let result = self.read(&bytes);
+        self.chain.pop();
+        result.map_err(|error| match error {
+            // Report where the innermost failure happened.
+            Error::Include { .. } | Error::Io { .. } | Error::IncludeCycle(_) => error,
+            Error::IncludeTooDeep => error,
+            error => Error::Include {
+                path: name.to_owned(),
+                error: Box::new(error),
+            },
+        })
+    }
 
-    let nu = decode_records(
-        &bytes[data_start..],
-        format,
-        def.columns.len(),
-        binary_records,
-        |record| {
+    fn decode(&mut self, bytes: &[u8]) -> Result<Data, Error> {
+        let sections = std::mem::take(&mut self.def.long_sections);
+        let (road, def) = (&self.road, &self.def);
+        let format = def.format.ok_or(Error::Missing("#: data format"))?;
+        let (v, v_from_positions, z_columns) = long_sections(road, sections)?;
+        let nv = v.len();
+
+        let binary_records = if format.ascii {
+            0
+        } else {
+            let end_u = road
+                .end_u
+                .ok_or(Error::Missing("REFERENCE_LINE_END_U for binary data"))?;
+            let steps =
+                (end_u - road.start_u.unwrap_or(0.0)) / road.u_increment.unwrap_or(0.01) + 0.5;
+            if !(steps >= 0.0 && steps.is_finite()) {
+                return Err(Error::Invalid("reference line end_u is before start_u"));
+            }
+            (steps as usize).checked_add(1).ok_or(Error::TooLarge)?
+        };
+        let capacity = binary_records.checked_mul(nv).ok_or(Error::TooLarge)?;
+        let has = |wanted: fn(&Column) -> bool| def.columns.iter().any(wanted);
+        let mut z = Vec::with_capacity(capacity);
+        let mut phi = has(|c| matches!(c, Column::Phi)).then(Vec::new);
+        let mut bank = has(|c| matches!(c, Column::Bank)).then(Vec::new);
+        let mut slope = has(|c| matches!(c, Column::Slope)).then(Vec::new);
+        let start_phi = road.start_phi.unwrap_or(0.0);
+
+        let nu = decode_records(bytes, format, def.columns.len(), binary_records, |record| {
             z.extend(z_columns.iter().map(|&c| record[c] as f32));
             for (column, &value) in def.columns.iter().zip(record) {
                 match column {
@@ -183,24 +298,28 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Parsed, Error> {
                     Column::Z | Column::Ignored => {}
                 }
             }
-        },
-    )?;
-    if nu == 0 {
-        return Err(Error::Invalid("data section has no complete record"));
+        })?;
+        if nu == 0 {
+            return Err(Error::Invalid("data section has no complete record"));
+        }
+        Ok(Data {
+            v,
+            v_from_positions,
+            nu,
+            z,
+            phi,
+            bank,
+            slope,
+        })
     }
+}
 
-    Ok(Parsed {
-        road,
-        options,
-        mods,
-        v,
-        v_from_positions,
-        nu,
-        z,
-        phi,
-        bank,
-        slope,
-    })
+/// Whether an options or modifiers block in a file at include `level` replaces the one
+/// defined at `current`. The block of the least nested file counts; the top-level file's
+/// last block replaces its earlier ones, while blocks in one included file add up
+/// (crgLoader.c:1000-1024).
+fn replaces(level: usize, current: Option<usize>) -> bool {
+    level == 0 || current.is_none_or(|current| level < current)
 }
 
 /// Empty lines and lines whose first non-space character is `*`.
@@ -334,6 +453,10 @@ mod tests {
     use crate::types::BorderMode;
     use std::path::Path;
 
+    fn parse_plain(bytes: &[u8]) -> Result<Parsed, Error> {
+        parse(bytes, &mut |_: &[String]| Err(Error::IncludeUnsupported))
+    }
+
     fn fixture(name: &str) -> Vec<u8> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
@@ -342,7 +465,7 @@ mod tests {
     }
 
     fn txt(name: &str) -> Result<Parsed, Error> {
-        parse(&fixture(&format!("crg-txt/{name}")))
+        parse_plain(&fixture(&format!("crg-txt/{name}")))
     }
 
     #[test]
@@ -404,7 +527,7 @@ mod tests {
         {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_str().unwrap();
-            match parse(&std::fs::read(&path).unwrap()) {
+            match parse_plain(&std::fs::read(&path).unwrap()) {
                 Ok(p) => assert_eq!(p.z.len(), p.nu * p.v.len(), "{name}"),
                 Err(Error::IncludeUnsupported) => assert!(
                     name.starts_with("fileref") || name.starts_with("testOption"),
@@ -417,7 +540,7 @@ mod tests {
 
     #[test]
     fn belgian_block_binary() {
-        let p = parse(&fixture("crg-bin/belgian_block.crg")).unwrap();
+        let p = parse_plain(&fixture("crg-bin/belgian_block.crg")).unwrap();
         let steps =
             (p.road.end_u.unwrap() - p.road.start_u.unwrap_or(0.0)) / p.road.u_increment.unwrap();
         assert_eq!(p.nu, (steps + 0.5) as usize + 1);
@@ -431,7 +554,7 @@ mod tests {
     fn border_mode_from_file_options() {
         let file = b"$ROAD_CRG\nREFERENCE_LINE_INCREMENT = 1.0\n$\n$ROAD_CRG_OPTS\nBORDER_MODE_V = 0\n$\n\
                      $KD_Definition\n#:LRFI\nD:long section 1,m\nD:long section 2,m\n$\n$$$$\n 1.0000000 2.0000000\n";
-        let p = parse(file).unwrap();
+        let p = parse_plain(file).unwrap();
         assert_eq!(p.options.unwrap().border_mode_v, Some(BorderMode::None));
         assert_eq!(p.v, [0.0, 0.01]);
         assert_eq!(p.z, [1.0, 2.0]);
@@ -440,7 +563,7 @@ mod tests {
     #[test]
     fn missing_separator_ends_section_like_the_c_api() {
         let file = b"$KD_Definition\n#:LRFI\nD:long section 1,m\nD:long section 2,m\n$$$$\n 1.0000000 2.0000000\n";
-        assert_eq!(parse(file).unwrap_err(), Error::NoData);
+        assert_eq!(parse_plain(file).unwrap_err(), Error::NoData);
     }
 
     #[test]
@@ -469,7 +592,7 @@ mod tests {
                     file.resize(start + 80, 0);
                 }
             }
-            let p = parse(&file).unwrap();
+            let p = parse_plain(&file).unwrap();
             assert_eq!(p.v, [-1.0, 1.0], "{code}");
             assert_eq!(p.z, [2.0, 1.0, 4.0, 3.0, 6.0, 5.0], "{code}");
             assert_eq!(p.phi.unwrap(), [0.0, 0.5, 0.25], "{code}");
@@ -486,7 +609,7 @@ mod tests {
             "crg_local_curv_test_ok",
             "crg_refline_Hoki_HoeKi_Grafing",
         ] {
-            let p = parse(&fixture(&format!("large/{name}.crg"))).unwrap();
+            let p = parse_plain(&fixture(&format!("large/{name}.crg"))).unwrap();
             assert_eq!(p.z.len(), p.nu * p.v.len(), "{name}");
             assert!(p.nu > 1000, "{name}");
         }
@@ -495,6 +618,6 @@ mod tests {
     #[test]
     fn reference_line_xy_is_unsupported() {
         let file = b"$KD_Definition\n#:LRFI\nD:reference line x,m\nD:reference line y,m\n$\n$$$$\n";
-        assert!(matches!(parse(file), Err(Error::Unsupported(_))));
+        assert!(matches!(parse_plain(file), Err(Error::Unsupported(_))));
     }
 }

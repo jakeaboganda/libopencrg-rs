@@ -40,8 +40,10 @@ fn check_case(path: &Path) -> Vec<String> {
     let text = fs::read_to_string(path).unwrap();
     let mut lines = text.lines().filter(|l| !l.starts_with('#'));
     let fixture = lines.next().unwrap().strip_prefix("fixture ").unwrap();
-    let bytes = fs::read(root().join("tests/fixtures").join(fixture))
+    let mut bytes = fs::read(root().join("tests/fixtures").join(fixture))
         .unwrap_or_else(|e| panic!("{fixture}: {e}"));
+    // header_KEY and mod_KEY options become blocks in front of the file, as in record.sh.
+    let (mut header, mut mods) = (String::new(), String::new());
 
     let mut options = LoadOptions::default();
     let mut failures = Vec::new();
@@ -56,9 +58,30 @@ fn check_case(path: &Path) -> Vec<String> {
                 "border_mode_v" => options.border_mode_v = border_mode(value),
                 "border_offset_u" => options.border_offset_u = value.parse().unwrap(),
                 "border_offset_v" => options.border_offset_v = value.parse().unwrap(),
-                _ => panic!("unknown option {key}"),
+                "smooth_u_begin" => options.smooth_u_begin = Some(value.parse().unwrap()),
+                "smooth_u_end" => options.smooth_u_end = Some(value.parse().unwrap()),
+                _ => {
+                    if let Some(key) = key.strip_prefix("header_") {
+                        header += &format!("{key} = {value}\n");
+                    } else if let Some(key) = key.strip_prefix("mod_") {
+                        mods += &format!("{key} = {value}\n");
+                    } else {
+                        panic!("unknown option {key}");
+                    }
+                }
             }
             continue;
+        }
+        if !(header.is_empty() && mods.is_empty()) {
+            let mut prefix = String::new();
+            if !header.is_empty() {
+                prefix += &format!("$ROAD_CRG\n{header}$!\n");
+            }
+            if !mods.is_empty() {
+                prefix += &format!("$ROAD_CRG_MODS\n{mods}$!\n");
+            }
+            bytes.splice(0..0, prefix.into_bytes());
+            (header, mods) = (String::new(), String::new());
         }
         let grid = grid.get_or_insert_with(|| {
             CrgGrid::from_bytes_with_options(&bytes, &options)

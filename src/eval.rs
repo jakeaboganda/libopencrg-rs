@@ -1,6 +1,6 @@
 //! Elevation queries, following `crgDataEvaluv2z` (crgEvalz.c:64).
 
-use crate::grid::CrgGrid;
+use crate::grid::{CrgGrid, Profile};
 use crate::{BorderMode, GridSample, Heading, Normal, Uv, Xy};
 
 /// Border handling for both axes.
@@ -11,6 +11,9 @@ pub(crate) struct Borders {
     /// Added to elevations beyond the u border, or replacing them in `Zero` mode.
     pub offset_u: f64,
     pub offset_v: f64,
+    /// Smoothing zone lengths, positive where set.
+    pub smooth_begin: Option<f64>,
+    pub smooth_end: Option<f64>,
 }
 
 impl Borders {
@@ -20,6 +23,8 @@ impl Borders {
         v: BorderMode::None,
         offset_u: 0.0,
         offset_v: 0.0,
+        smooth_begin: None,
+        smooth_end: None,
     };
 }
 
@@ -37,8 +42,18 @@ struct Cell {
     grid: bool,
     /// `false` beyond a `Zero` u border.
     bank: bool,
+    /// v for banking, before clipping to the core area, and its derivative by v.
+    bank_v: f64,
+    bank_sv: f64,
     border: Border,
     offset: f64,
+    /// u after `Repeat` or `Reflect`, and its derivative by u.
+    u: f64,
+    u_sign: f64,
+    /// Whether u lies in the core area after `Repeat` or `Reflect`.
+    in_u: bool,
+    /// The end whose reference-line height a `Keep` or `Zero` u border smooths toward.
+    smooth_side: Option<Side>,
 }
 
 /// How the border offset combines with the elevation.
@@ -49,13 +64,19 @@ enum Border {
     Replace,
 }
 
+#[derive(Clone, Copy)]
+enum Side {
+    Begin,
+    End,
+}
+
 /// Tolerance for positions just outside a positioned long section (crgEvalz.c:30).
 const MAX_BORDER_ERROR: f64 = 1.0e-8;
 
 impl CrgGrid {
-    /// Grid elevation and slopes at `uv`, without reference-line height, slope, bank, or
-    /// load-time shift. Returns `None` where a `None` border refuses the query or the grid
-    /// has a NaN hole.
+    /// Grid elevation and slopes at `uv`, without reference-line height, slope, bank,
+    /// smoothing, or load-time shift. Returns `None` where a `None` border refuses the query
+    /// or the grid has a NaN hole.
     #[inline]
     pub fn grid_at_uv(&self, uv: Uv) -> Option<GridSample> {
         let cell = self.locate(uv, &self.borders)?;
@@ -75,8 +96,8 @@ impl CrgGrid {
     }
 
     /// Road elevation at `uv` in metres: reference-line height, bank times v, and grid
-    /// elevation, with border modes and offsets applied. Returns `None` where a `None` border
-    /// refuses the query or the grid has a NaN hole.
+    /// elevation, with border modes, offsets, and smoothing applied. Returns `None` where a
+    /// `None` border refuses the query or the grid has a NaN hole.
     #[inline]
     pub fn elevation_at_uv(&self, uv: Uv) -> Option<f64> {
         self.raw_elevation(uv, &self.borders)
@@ -143,28 +164,9 @@ impl CrgGrid {
     /// the xy mapping folds over itself, at or beyond the reference line's centre of
     /// curvature.
     pub fn normal_at_uv(&self, uv: Uv) -> Option<Normal> {
-        let cell = self.locate(uv, &self.borders)?;
-        let (mut dz_du, mut dz_dv) = (0.0, 0.0);
-        if cell.grid {
-            let (c, d10, d01, z00) = self.corners(&cell);
-            if ((c * cell.fv + d10) * cell.fu + d01 * cell.fv + z00).is_nan() {
-                return None;
-            }
-            dz_du = (c * cell.fv + d10) * cell.su;
-            dz_dv = (c * cell.fu + d01) * cell.sv;
-        }
-        dz_du += self.ref_z.step(cell.iu) * cell.su;
-        if let Some(bank) = &self.bank
-            && cell.bank
-        {
-            let v = uv.v.clamp(self.v.first, self.v.last);
-            dz_du += bank.step(cell.iu) * cell.su * v;
-            if v == uv.v {
-                dz_dv += bank.at(cell.iu, cell.fu);
-            }
-        }
-        if cell.border == Border::Replace {
-            (dz_du, dz_dv) = (0.0, 0.0);
+        let (z, dz_du, dz_dv) = self.surface::<true>(uv, &self.borders)?;
+        if z.is_nan() {
+            return None;
         }
 
         // Normal of the surface (x, y, z)(u, v): the cross product of its u and v tangents.
@@ -187,27 +189,100 @@ impl CrgGrid {
     }
 
     /// Elevation exactly as the C-API computes it, NaN included.
+    #[inline]
     pub(crate) fn raw_elevation(&self, uv: Uv, borders: &Borders) -> Option<f64> {
+        self.surface::<false>(uv, borders).map(|(z, _, _)| z)
+    }
+
+    /// Elevation and, when `SLOPES` is set, its derivatives by u and v. The elevation
+    /// follows the operation order of `crgDataEvaluv2z`.
+    #[inline]
+    fn surface<const SLOPES: bool>(&self, uv: Uv, borders: &Borders) -> Option<(f64, f64, f64)> {
         let cell = self.locate(uv, borders)?;
-        let mut z = 0.0;
+        let (mut z, mut dz_du, mut dz_dv) = (0.0, 0.0, 0.0);
         if cell.grid {
             let (c, d10, d01, z00) = self.corners(&cell);
             z = (c * cell.fv + d10) * cell.fu + d01 * cell.fv + z00;
             z += self.z_shift;
+            if SLOPES {
+                dz_du = (c * cell.fv + d10) * cell.su;
+                dz_dv = (c * cell.fu + d01) * cell.sv;
+            }
         }
+        let smooth = self.smoothing(&cell, borders);
+
         z += self.ref_z.at(cell.iu, cell.fu);
+        if SLOPES {
+            dz_du += self.ref_z.step(cell.iu) * cell.su;
+        }
         if let Some(bank) = &self.bank
             && cell.bank
         {
-            let v = uv.v.clamp(self.v.first, self.v.last);
-            z += bank.at(cell.iu, cell.fu) * v;
+            let v = cell.bank_v.clamp(self.v.first, self.v.last);
+            let b = bank.at(cell.iu, cell.fu);
+            z += b * v;
+            if SLOPES {
+                dz_du += bank.step(cell.iu) * cell.su * v;
+                if v == cell.bank_v {
+                    dz_dv += b * cell.bank_sv;
+                }
+            }
         }
         match cell.border {
             Border::Inside => {}
             Border::Add => z += cell.offset,
-            Border::Replace => z = cell.offset,
+            Border::Replace => {
+                z = cell.offset;
+                (dz_du, dz_dv) = (0.0, 0.0);
+            }
         }
-        Some(z)
+        if let Some((base, scale, scale_du)) = smooth {
+            if SLOPES {
+                dz_du = dz_du * scale + (z - base) * scale_du;
+                dz_dv *= scale;
+            }
+            z = base + (z - base) * scale;
+        }
+        Some((z, dz_du, dz_dv))
+    }
+
+    /// Base height, scale, and d(scale)/du of the smoothing zone `cell` lies in, as
+    /// crgEvalz.c:502-558 computes them.
+    #[inline]
+    fn smoothing(&self, cell: &Cell, borders: &Borders) -> Option<(f64, f64, f64)> {
+        if borders.smooth_begin.is_none() && borders.smooth_end.is_none() {
+            return None;
+        }
+        let (first, last) = (self.u.first, self.u.last);
+        let mut zone = None;
+        if cell.in_u || cell.smooth_side.is_some() {
+            if let Some(length) = borders.smooth_begin
+                && cell.u - first <= length
+            {
+                zone = Some(if cell.u < first {
+                    (Side::Begin, 0.0, 0.0)
+                } else {
+                    (Side::Begin, (cell.u - first) / length, cell.u_sign / length)
+                });
+            }
+            if let Some(length) = borders.smooth_end
+                && last - cell.u <= length
+            {
+                zone = Some(if cell.u > last {
+                    (Side::End, 0.0, 0.0)
+                } else {
+                    (Side::End, (last - cell.u) / length, -cell.u_sign / length)
+                });
+            }
+        }
+        let (side, scale, scale_du) = zone?;
+        let base = match (side, &self.ref_z) {
+            (Side::Begin, Profile::Nodes(values)) => values[0],
+            (Side::End, Profile::Nodes(values)) => values[values.len() - 1],
+            (Side::Begin, Profile::Constant(z)) => *z,
+            (Side::End, Profile::Constant(_)) => self.ref_z_end,
+        };
+        Some((base, scale, scale_du))
     }
 
     /// Bilinear coefficients in the operation order of crgEvalz.c:489-495.
@@ -229,44 +304,61 @@ impl CrgGrid {
         let mut offset = 0.0;
 
         let u = &self.u;
+        let mut at_u = uv.u;
+        let mut u_sign = 1.0;
+        let mut smooth_side = None;
         let mut fu = (uv.u - u.first) / u.inc;
-        let mut su = 1.0 / u.inc;
-        let in_u = !(uv.u < u.first || uv.u > u.last);
+        let mut in_u = !(uv.u < u.first || uv.u > u.last);
         if !in_u {
+            let side = if fu < 0.0 { Side::Begin } else { Side::End };
             match borders.u {
                 BorderMode::None => return None,
                 BorderMode::Zero => {
                     grid = false;
                     bank = false;
+                    smooth_side = Some(side);
                 }
-                _ => {}
+                BorderMode::Keep => smooth_side = Some(side),
+                BorderMode::Repeat | BorderMode::Reflect => {
+                    u_sign = wrap(&mut fu, uv.u - u.first, u.last - u.first, u.inc, borders.u);
+                    in_u = true;
+                    at_u = u.first + fu * u.inc;
+                }
             }
             offset += borders.offset_u;
         }
         let (iu, clamped) = split(&mut fu, u.n);
-        if clamped {
-            su = 0.0;
-        }
+        let su = if clamped { 0.0 } else { u_sign / u.inc };
 
         let v = &self.v;
         let mut mode_v = borders.v;
         let mut in_v = true;
+        let mut bank_v = uv.v;
+        let mut bank_sv = 1.0;
         let (iv, fv, sv);
         if let Some(inc) = v.uniform_inc {
             let mut f = (uv.v - v.first) / inc;
+            let mut sign = 1.0;
             if uv.v < v.first || uv.v > v.last {
                 in_v = false;
                 match mode_v {
                     BorderMode::None => return None,
                     BorderMode::Zero => grid = false,
-                    _ => {}
+                    BorderMode::Keep => {}
+                    BorderMode::Repeat | BorderMode::Reflect => {
+                        sign = wrap(&mut f, uv.v - v.first, v.last - v.first, inc, mode_v);
+                        in_v = true;
+                        bank_v = v.first + f * inc;
+                        bank_sv = sign;
+                    }
                 }
                 offset += borders.offset_v;
             }
             let (i, clamped) = split(&mut f, v.nodes.len());
-            (iv, fv, sv) = (i, f, if clamped { 0.0 } else { 1.0 / inc });
+            (iv, fv, sv) = (i, f, if clamped { 0.0 } else { sign / inc });
         } else {
             let mut pos = uv.v;
+            let mut sign = 1.0;
             if pos < v.first || pos > v.last {
                 in_v = false;
                 if (pos - v.first).abs() < MAX_BORDER_ERROR {
@@ -279,7 +371,11 @@ impl CrgGrid {
                     match mode_v {
                         BorderMode::None => return None,
                         BorderMode::Zero => grid = false,
-                        _ => {}
+                        BorderMode::Keep => {}
+                        BorderMode::Repeat | BorderMode::Reflect => {
+                            sign = wrap_positioned(&mut pos, v.first, v.last, mode_v);
+                            in_v = true;
+                        }
                     }
                 }
                 offset += borders.offset_v;
@@ -289,7 +385,7 @@ impl CrgGrid {
             let width = nodes[i + 1] - nodes[i];
             let f = (pos - nodes[i]) / width;
             let clamped = f.clamp(0.0, 1.0);
-            (iv, fv, sv) = (i, clamped, if clamped == f { 1.0 / width } else { 0.0 });
+            (iv, fv, sv) = (i, clamped, if clamped == f { sign / width } else { 0.0 });
         }
 
         let border = if !in_u {
@@ -308,8 +404,14 @@ impl CrgGrid {
             sv,
             grid,
             bank,
+            bank_v,
+            bank_sv,
             border,
             offset,
+            u: at_u,
+            u_sign,
+            in_u,
+            smooth_side,
         })
     }
 }
@@ -319,6 +421,71 @@ fn border_kind(mode: BorderMode) -> Border {
         BorderMode::Zero => Border::Replace,
         BorderMode::Keep => Border::Add,
         _ => Border::Inside,
+    }
+}
+
+/// Maps a node coordinate `frac` beyond a uniformly spaced axis back onto it, for `Repeat`
+/// or `Reflect` (crgEvalz.c:159-190, 257-290). `from_first` is the distance from the first
+/// node and `size` the axis length. Returns the sign of the mapping's slope, 1 or -1.
+fn wrap(frac: &mut f64, from_first: f64, size: f64, inc: f64, mode: BorderMode) -> f64 {
+    let max = size / inc;
+    if mode == BorderMode::Repeat {
+        *frac %= max;
+        if *frac < 0.0 {
+            *frac += max;
+        }
+        return 1.0;
+    }
+    // The C-API truncates to int; parity only matters within that range.
+    let sequence = (from_first / size).trunc().abs();
+    let sign = if *frac < 0.0 { -1.0 } else { 1.0 };
+    *frac = frac.abs() - sequence * max;
+    if sequence % 2.0 == 1.0 {
+        *frac = max - *frac;
+        -sign
+    } else {
+        sign
+    }
+}
+
+/// `Repeat` or `Reflect` for positioned long sections (crgEvalz.c:363-409). Returns the
+/// derivative of the new position by the old one.
+fn wrap_positioned(pos: &mut f64, first: f64, last: f64, mode: BorderMode) -> f64 {
+    let range = last - first;
+    if mode == BorderMode::Repeat {
+        if *pos > last {
+            *pos = first + (*pos - last) % range;
+        } else if *pos < first {
+            *pos = last + (*pos - first) % range;
+        }
+        // Again allow for rounding at the edges.
+        if (*pos - first).abs() < MAX_BORDER_ERROR {
+            *pos = first;
+        } else if (*pos - last).abs() < MAX_BORDER_ERROR {
+            *pos = last;
+        }
+        return 1.0;
+    }
+    if *pos > last {
+        let remainder = (*pos - last) % range;
+        let sequence = ((*pos - last) / range).trunc().abs();
+        if sequence % 2.0 == 0.0 {
+            *pos = last - remainder;
+            -1.0
+        } else {
+            *pos = first + remainder;
+            1.0
+        }
+    } else {
+        let remainder = (*pos - first) % range;
+        let sequence = ((*pos - first) / range).trunc().abs();
+        if sequence % 2.0 == 1.0 {
+            *pos = last + remainder;
+            1.0
+        } else {
+            *pos = first - remainder;
+            -1.0
+        }
     }
 }
 
@@ -354,11 +521,15 @@ mod tests {
         std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     }
 
-    /// `handmade_straight.crg` with `block` inserted before its `$ROAD_CRG` section.
-    fn straight_with(block: &str) -> Vec<u8> {
-        let text = String::from_utf8(fixture("handmade_straight.crg")).unwrap();
+    /// Fixture `name` with `block` inserted before its `$ROAD_CRG` section.
+    fn fixture_with(name: &str, block: &str) -> Vec<u8> {
+        let text = String::from_utf8(fixture(name)).unwrap();
         let at = text.find("$ROAD_CRG ").unwrap();
         format!("{}{block}\n$\n{}", &text[..at], &text[at..]).into_bytes()
+    }
+
+    fn straight_with(block: &str) -> Vec<u8> {
+        fixture_with("handmade_straight.crg", block)
     }
 
     fn uv(u: f64, v: f64) -> Uv {
@@ -419,42 +590,50 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_features_are_named() {
-        let unsupported = |block: &str| match CrgGrid::from_bytes(&straight_with(block)) {
-            Err(Error::Unsupported(feature)) => feature,
-            other => panic!("{block}: {other:?}"),
-        };
-        assert_eq!(
-            unsupported("$ROAD_CRG_OPTS\nborder_mode_v = 3"),
-            "repeat and reflect border modes"
+    fn rejected_settings_are_named() {
+        let circle = fixture_with(
+            "handmade_circle.crg",
+            "$ROAD_CRG_OPTS\nrefline_continuation = 1",
         );
         assert_eq!(
-            unsupported("$ROAD_CRG_OPTS\nborder_smooth_ubeg = 1"),
-            "border smoothing"
+            CrgGrid::from_bytes(&circle).unwrap_err(),
+            Error::Unsupported("closed-track reference line continuation")
         );
-        assert_eq!(
-            unsupported("$ROAD_CRG_MODS\nscale_z_grid = 2"),
-            "scaling modifiers"
+        // The straight line is not closed, so continuation changes nothing.
+        assert!(
+            CrgGrid::from_bytes(&straight_with("$ROAD_CRG_OPTS\nrefline_continuation = 1")).is_ok()
         );
+        for mods in ["scale_length = 0", "scale_width = -1"] {
+            let bytes = straight_with(&format!("$ROAD_CRG_MODS\n{mods}"));
+            assert!(
+                matches!(CrgGrid::from_bytes(&bytes), Err(Error::Invalid(_))),
+                "{mods}"
+            );
+        }
     }
 
     /// Largest distance between `normal_at_uv` and the normal of the surface traced by
     /// `xy_from_uv` and `elevation_at_uv`, from central differences.
     fn normal_error(name: &str) -> f64 {
         let grid = CrgGrid::from_bytes(&fixture(name)).unwrap();
+        let points = [
+            (7.3, 0.2),
+            (12.6, -1.2),
+            (15.25, 1.3),
+            (3.7, 0.7),
+            (18.1, -0.4),
+        ];
+        surface_normal_error(&grid, &points)
+    }
+
+    fn surface_normal_error(grid: &CrgGrid, points: &[(f64, f64)]) -> f64 {
         let point = |u, v| {
             let xy = grid.xy_from_uv(uv(u, v));
             [xy.x, xy.y, grid.elevation_at_uv(uv(u, v)).unwrap()]
         };
         let h = 1e-6;
         let mut worst: f64 = 0.0;
-        for (u, v) in [
-            (7.3, 0.2),
-            (12.6, -1.2),
-            (15.25, 1.3),
-            (3.7, 0.7),
-            (18.1, -0.4),
-        ] {
+        for &(u, v) in points {
             let (a, b) = (point(u + h, v), point(u - h, v));
             let (c, d) = (point(u, v + h), point(u, v - h));
             let tu: [f64; 3] = std::array::from_fn(|i| (a[i] - b[i]) / (2.0 * h));
@@ -482,6 +661,27 @@ mod tests {
         assert!(normal_error("handmade_banked.crg") < 1e-9);
         assert!(normal_error("handmade_curved_banked_sloped.crg") < 1e-9);
         assert!(normal_error("handmade_circle.crg") < 1e-9);
+    }
+
+    #[test]
+    fn normals_follow_wrapped_borders_and_smoothing() {
+        let opts = "$ROAD_CRG_OPTS\nborder_mode_u = 4\nborder_mode_v = 4\n\
+                    border_smooth_ubeg = 3\nborder_smooth_uend = 2";
+        // Points in reflected copies an odd number of lengths away, and in smoothing zones.
+        let points = [
+            (-30.3, 4.3),
+            (-8.2, -5.1),
+            (41.6, 0.7),
+            (1.3, 0.35),
+            (20.7, -0.85),
+        ];
+        for name in ["handmade_straight.crg", "handmade_curved_banked_sloped.crg"] {
+            let grid = CrgGrid::from_bytes(&fixture_with(name, opts)).unwrap();
+            assert!(surface_normal_error(&grid, &points) < 1e-8, "{name}");
+        }
+        let repeat = opts.replace('4', "3");
+        let grid = CrgGrid::from_bytes(&straight_with(&repeat)).unwrap();
+        assert!(surface_normal_error(&grid, &points) < 1e-8);
     }
 
     #[test]

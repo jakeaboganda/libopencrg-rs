@@ -3,7 +3,8 @@
 #
 # Queries: a lattice that includes the grid edges, points just outside positioned long
 # sections, points beyond every border and corner, and seeded random points in a box that
-# extends past the grid. Each point gets z, xy, and pk.
+# extends past the grid, then points several grid lengths away, where repeated and reflected
+# borders wrap more than once. Each point gets z, xy, and pk.
 #
 # The generator is a Park-Miller LCG, so every awk produces the same numbers.
 
@@ -40,4 +41,7 @@ function point(u, v) {
 
     for (i = 0; i < 150; i++)
         point(umin - du + rand01() * (ul + 2 * du), vmin - dv + rand01() * (vl + 2 * dv))
+
+    for (i = 0; i < 30; i++)
+        point(umin + (rand01() * 8 - 4) * ul, vmin + (rand01() * 8 - 4) * vl)
 }

@@ -9,6 +9,9 @@
 #
 # Each output line is "QUERY = RESULT". Cases whose fixture is missing are skipped.
 #
+# Options named header_KEY and mod_KEY go into a $ROAD_CRG or $ROAD_CRG_MODS block that is
+# prepended to the fixture; tests/oracle.rs builds the same text.
+#
 # A second pass maps every recorded xy result A back to uv: "reset", "uv A", then "uv B", where
 # B is the next point's xy nudged off it, then "reset", "uv B". A uv query right after reset
 # searches globally; one after another uv query starts from the previous result.
@@ -30,17 +33,31 @@ grep -v '^#' "$root/tools/oracle/cases.txt" | while read -r name fixture options
     fi
 
     : >"$tmp/settings"
+    : >"$tmp/header"
+    : >"$tmp/mods"
     for option in $options; do
         key=${option%%=*}
         value=${option#*=}
         case $key in
-            border_mode_u) echo "opti 1 $value" ;;
-            border_mode_v) echo "opti 2 $value" ;;
-            border_offset_u) echo "optd 5 $value" ;;
-            border_offset_v) echo "optd 6 $value" ;;
+            border_mode_u) echo "opti 1 $value" >>"$tmp/settings" ;;
+            border_mode_v) echo "opti 2 $value" >>"$tmp/settings" ;;
+            border_offset_u) echo "optd 5 $value" >>"$tmp/settings" ;;
+            border_offset_v) echo "optd 6 $value" >>"$tmp/settings" ;;
+            smooth_u_begin) echo "optd 7 $value" >>"$tmp/settings" ;;
+            smooth_u_end) echo "optd 8 $value" >>"$tmp/settings" ;;
+            header_*) echo "${key#header_} = $value" >>"$tmp/header" ;;
+            mod_*) echo "${key#mod_} = $value" >>"$tmp/mods" ;;
             *) echo "unknown option $key in case $name" >&2; exit 1 ;;
-        esac >>"$tmp/settings"
+        esac
     done
+    if [ -s "$tmp/header" ] || [ -s "$tmp/mods" ]; then
+        {
+            if [ -s "$tmp/header" ]; then echo '$ROAD_CRG'; cat "$tmp/header"; echo '$!'; fi
+            if [ -s "$tmp/mods" ]; then echo '$ROAD_CRG_MODS'; cat "$tmp/mods"; echo '$!'; fi
+            cat "$file"
+        } >"$tmp/fixture.crg"
+        file=$tmp/fixture.crg
+    fi
 
     # The seed depends only on the name, so reordering cases changes nothing.
     seed=$(printf '%s' "$name" | cksum | cut -d' ' -f1)

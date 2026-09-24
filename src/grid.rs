@@ -2,9 +2,9 @@
 //! `crgDataSetModifiersApply` of the C-API.
 
 use crate::eval::Borders;
-use crate::parse::{self, Mods, NanMode, Options, Parsed, Road};
+use crate::parse::{self, Mods, NanMode, Parsed, Road};
 use crate::refline::RefLine;
-use crate::{BorderMode, Error, LoadOptions, Uv, Xy};
+use crate::{Error, LoadOptions, Uv, Xy};
 
 /// A loaded OpenCRG road surface.
 ///
@@ -18,6 +18,9 @@ pub struct CrgGrid {
     /// Constant added to every grid value, from placing the data set at load.
     pub(crate) z_shift: f64,
     pub(crate) ref_z: Profile,
+    /// Reference-line height at the end where `ref_z` is constant: `REFERENCE_LINE_END_Z`,
+    /// which only end-of-road smoothing reads.
+    pub(crate) ref_z_end: f64,
     /// `None` when the file defines no banking.
     pub(crate) bank: Option<Profile>,
     pub(crate) refline: RefLine,
@@ -86,31 +89,28 @@ impl CrgGrid {
         Self::build(parse::parse(bytes)?, options)
     }
 
-    fn build(p: Parsed, caller: &LoadOptions) -> Result<Self, Error> {
-        let road = &p.road;
+    fn build(mut p: Parsed, caller: &LoadOptions) -> Result<Self, Error> {
         let options = p.options.clone().unwrap_or_default();
-        check_supported(&options, p.mods.as_ref(), caller)?;
 
         if p.nu < 2 {
             return Err(Error::Invalid("fewer than two cross sections"));
         }
-        let inc = road.u_increment.unwrap_or(0.01);
+        let inc = p.road.u_increment.unwrap_or(0.01);
         if !(inc > 0.0 && inc.is_finite()) {
             return Err(Error::Invalid("reference line increment must be positive"));
         }
-        let first = road.start_u.unwrap_or(0.0);
-        let u = UAxis {
+        let first = p.road.start_u.unwrap_or(0.0);
+        let mut u = UAxis {
             first,
             last: first + inc * (p.nu - 1) as f64,
             inc,
             n: p.nu,
         };
-        let v = v_axis(road, p.v, p.v_from_positions)?;
-        let refline = RefLine::new(road, &u, p.phi);
+        let mut v = v_axis(&p.road, std::mem::take(&mut p.v), p.v_from_positions)?;
 
         // Without a $ROAD_CRG_MODS block the C-API applies its default modifiers; a block
         // replaces them entirely (crgOptionMgmt.c:507, crgLoader.c:1021).
-        let mods = p.mods.unwrap_or_else(|| Mods {
+        let mods = p.mods.take().unwrap_or_else(|| Mods {
             grid_nan_mode: Some(NanMode::KeepLast),
             refpoint_x: Some(0.0),
             refpoint_y: Some(0.0),
@@ -119,16 +119,33 @@ impl CrgGrid {
             ..Mods::default()
         });
 
+        // The C-API prepares the data once as loaded, then again after scaling. Only the
+        // reference-line height can keep a value from the first pass.
+        let loaded_ref_z = ref_line_z(&p.road, &u, p.slope.as_deref());
+        let has_bank = p.bank.is_some()
+            || p.road.start_bank.is_some_and(|b| b != 0.0)
+            || p.road.end_bank.is_some_and(|b| b != 0.0);
+        scale(&mut p, &mut u, &mut v, &mods)?;
+        let road = &p.road;
+
         let mut z = p.z;
         if let Some(mode @ (NanMode::SetZero | NanMode::KeepLast)) = mods.grid_nan_mode {
             let offset = mods.grid_nan_offset.unwrap_or(0.0) as f32;
             fill_nans(&mut z, v.nodes.len(), mode, offset);
         }
 
-        let ref_z = ref_line_z(road, &u, p.slope.as_deref());
-        let has_bank = p.bank.is_some()
-            || road.start_bank.is_some_and(|b| b != 0.0)
-            || road.end_bank.is_some_and(|b| b != 0.0);
+        let refline = RefLine::new(road, &u, p.phi);
+        if refline.closed && options.refline_close_track == Some(true) {
+            return Err(Error::Unsupported(
+                "closed-track reference line continuation",
+            ));
+        }
+        // calcRefLineZ skips the second pass when scaling zeroed a constant slope.
+        let ref_z = if p.slope.is_none() && road.start_slope.unwrap_or(0.0) == 0.0 {
+            loaded_ref_z
+        } else {
+            ref_line_z(road, &u, p.slope.as_deref())
+        };
         let bank = has_bank.then(|| match p.bank {
             Some(values) => Profile::Nodes(values),
             None => Profile::Constant(road.start_bank.unwrap_or(0.0)),
@@ -141,6 +158,8 @@ impl CrgGrid {
             v: options.border_mode_v.unwrap_or(base.border_mode_v),
             offset_u: options.border_offset_u.unwrap_or(base.border_offset_u),
             offset_v: options.border_offset_v.unwrap_or(base.border_offset_v),
+            smooth_begin: smoothing(options.smooth_u_begin, base.smooth_u_begin),
+            smooth_end: smoothing(options.smooth_u_end, base.smooth_u_end),
         };
         let mut grid = CrgGrid {
             u,
@@ -148,6 +167,7 @@ impl CrgGrid {
             z,
             z_shift: 0.0,
             ref_z,
+            ref_z_end: road.end_z.unwrap_or(0.0),
             bank,
             refline,
             borders: borders(&LoadOptions::default()),
@@ -222,7 +242,10 @@ impl CrgGrid {
         self.refline.transform(center, angle, shift);
         match &mut self.ref_z {
             Profile::Nodes(values) => values.iter_mut().for_each(|z| *z += dz),
-            Profile::Constant(z) if road.start_z.is_some() => *z += dz,
+            Profile::Constant(z) if road.start_z.is_some() => {
+                *z += dz;
+                self.ref_z_end += dz;
+            }
             Profile::Constant(_) => self.z_shift += dz,
         }
     }
@@ -255,33 +278,87 @@ impl CrgGrid {
     }
 }
 
-/// Features that later steps implement. Failing here beats evaluating them wrongly.
-fn check_supported(
-    options: &Options,
-    mods: Option<&Mods>,
-    caller: &LoadOptions,
-) -> Result<(), Error> {
-    let repeats = |mode| matches!(mode, BorderMode::Repeat | BorderMode::Reflect);
-    let mode_u = options.border_mode_u.unwrap_or(caller.border_mode_u);
-    let mode_v = options.border_mode_v.unwrap_or(caller.border_mode_v);
-    if repeats(mode_u) || repeats(mode_v) {
-        return Err(Error::Unsupported("repeat and reflect border modes"));
+/// A smoothing zone from the file, else from the caller. The C-API ignores zones that are
+/// not positive.
+fn smoothing(file: Option<f64>, caller: Option<f64>) -> Option<f64> {
+    file.or(caller).filter(|&zone| zone > 0.0)
+}
+
+/// Applies the scaling modifiers as `crgDataSetModifiersApply` (crgMgr.c:503) does, and
+/// drops the header end values that scaling invalidates.
+fn scale(p: &mut Parsed, u: &mut UAxis, v: &mut VAxis, mods: &Mods) -> Result<(), Error> {
+    let factors = [
+        mods.scale_z_grid,
+        mods.scale_slope,
+        mods.scale_banking,
+        mods.scale_length,
+        mods.scale_width,
+        mods.scale_curvature,
+    ];
+    if factors.iter().flatten().any(|k| !k.is_finite()) {
+        return Err(Error::Invalid("scale factors must be finite"));
     }
-    if options.smooth_u_begin.is_some() || options.smooth_u_end.is_some() {
-        return Err(Error::Unsupported("border smoothing"));
+    if [mods.scale_length, mods.scale_width]
+        .iter()
+        .flatten()
+        .any(|&k| k <= 0.0)
+    {
+        return Err(Error::Invalid(
+            "length and width scale factors must be positive",
+        ));
     }
-    if let Some(m) = mods {
-        let scales = [
-            m.scale_z_grid,
-            m.scale_slope,
-            m.scale_banking,
-            m.scale_length,
-            m.scale_width,
-            m.scale_curvature,
-        ];
-        if scales.iter().any(Option::is_some) {
-            return Err(Error::Unsupported("scaling modifiers"));
+    let road = &mut p.road;
+    let times = |value: &mut Option<f64>, k: f64| {
+        if let Some(value) = value {
+            *value *= k;
         }
+    };
+
+    if let Some(k) = mods.scale_z_grid {
+        let k = k as f32;
+        p.z.iter_mut().for_each(|z| *z *= k);
+    }
+    if let Some(k) = mods.scale_slope {
+        if let Some(slope) = &mut p.slope {
+            slope.iter_mut().for_each(|s| *s *= k);
+        }
+        times(&mut road.start_slope, k);
+        times(&mut road.end_slope, k);
+        road.end_z = None;
+    }
+    if let Some(k) = mods.scale_banking {
+        if let Some(bank) = &mut p.bank {
+            bank.iter_mut().for_each(|b| *b *= k);
+        }
+        times(&mut road.start_bank, k);
+        times(&mut road.end_bank, k);
+    }
+    if let Some(k) = mods.scale_length {
+        u.last = u.first + k * (u.last - u.first);
+        u.inc *= k;
+        road.end_x = None;
+        road.end_y = None;
+        road.end_z = None;
+    }
+    if let Some(k) = mods.scale_width {
+        v.nodes.iter_mut().for_each(|node| *node *= k);
+        v.first *= k;
+        v.last *= k;
+        if let Some(inc) = &mut v.uniform_inc {
+            *inc *= k;
+        }
+    }
+    if let Some(k) = mods.scale_curvature {
+        // Headings turn relative to the start heading; the first node keeps its value.
+        let first = road.start_phi.unwrap_or(0.0);
+        if let Some(phi) = &mut p.phi {
+            phi.iter_mut()
+                .skip(1)
+                .for_each(|phi| *phi = first + k * (*phi - first));
+        }
+        road.end_phi = None;
+        road.end_x = None;
+        road.end_y = None;
     }
     Ok(())
 }

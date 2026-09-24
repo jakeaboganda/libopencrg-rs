@@ -55,16 +55,24 @@ pub struct LoadOptions {
     pub border_offset_u: f64,
     /// Elevation offset beyond the v border in metres. Replaces the elevation in `Zero` mode.
     pub border_offset_v: f64,
+    /// Length in metres over which elevation fades in from the reference-line height at
+    /// the start of the grid. `None`, or a length that is not positive, disables it.
+    pub smooth_u_begin: Option<f64>,
+    /// Length in metres over which elevation fades out to the reference-line height at the
+    /// end of the grid. `None`, or a length that is not positive, disables it.
+    pub smooth_u_end: Option<f64>,
 }
 
 impl Default for LoadOptions {
-    /// The C-API defaults: `Keep` on both axes, no offsets.
+    /// The C-API defaults: `Keep` on both axes, no offsets, no smoothing.
     fn default() -> Self {
         Self {
             border_mode_u: BorderMode::Keep,
             border_mode_v: BorderMode::Keep,
             border_offset_u: 0.0,
             border_offset_v: 0.0,
+            smooth_u_begin: None,
+            smooth_u_end: None,
         }
     }
 }

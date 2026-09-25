@@ -139,4 +139,4 @@ The test fixtures come from ASAM OpenCRG. See `tests/fixtures/NOTICE`.
 
 ## Licence
 
-Apache License 2.0. See `LICENSE-APACHE`.
+Licensed under either the Apache License 2.0 (`LICENSE-APACHE`) or the MIT licence (`LICENSE-MIT`), at your option.

@@ -97,23 +97,23 @@ Results under wasm match native, except curvature, which differs by up to 1e-10 
 
 `cargo bench` on an AMD Ryzen 9 5900HS, pinned to one core with `taskset -c 2`. Times are per query, and each range spans three runs.
 
-| File | Nodes | Load | `elevation_at_uv` | `normal_at_uv` | `xy_from_uv` | `uv_from_xy` | `uv_from_xy_near` |
-|------|-------|------|-------------------|----------------|--------------|--------------|-------------------|
-| `belgian_block.crg` | 1001 × 341 | 3–5 ms | 19–21 ns | 70–72 ns | 21 ns | 111–113 ns | 47–48 ns |
-| `country_road.crg` | 56 897 × 370 | 170–176 ms | 26 ns | 80–82 ns | 26–27 ns | 5.2–5.9 µs | 56–58 ns |
-| `crg_refline_Hoki_HoeKi_Grafing.crg` | 881 975 × 3 | 71–76 ms | 20–26 ns | 80–92 ns | 30–31 ns | 108–116 µs | 65–66 ns |
+| File | Nodes | Load | `elevation_at_uv` | `normal_at_uv` | `heading_at_uv` | `xy_from_uv` | `uv_from_xy` | `uv_from_xy_near` |
+|------|-------|------|-------------------|----------------|-----------------|--------------|--------------|-------------------|
+| `belgian_block.crg` | 1001 × 341 | 3–5 ms | 19–21 ns | 71–72 ns | 21 ns | 21 ns | 108–114 ns | 21–22 ns |
+| `country_road.crg` | 56 897 × 370 | 170–222 ms | 25–46 ns | 79–85 ns | 23–26 ns | 26 ns | 4.8–5.4 µs | 30 ns |
+| `crg_refline_Hoki_HoeKi_Grafing.crg` | 881 975 × 3 | 72–99 ms | 19–27 ns | 82–90 ns | 27–43 ns | 29–31 ns | 104–121 µs | 42–52 ns |
 
-`uv_from_xy` scans every tenth reference-line node, like the C-API with no history, so its time grows with road length. `uv_from_xy_near` walks from the hint. For a vehicle that moves 0.25 m per query, its time does not depend on road length.
+`uv_from_xy` scans every tenth reference-line node, like the C-API with no history, so its time grows with road length. `uv_from_xy_near` walks from where the previous search ended. For a vehicle that moves 0.25 m per query, its time does not depend on road length.
 
-The C-API answering the same queries, built with `gcc -O3` and timed the same way:
+The C-API answering the same queries, built with `gcc -O3` and timed the same way over three to six runs:
 
-| File | Load | `crgEvaluv2z` | `crgEvaluv2xy` | `crgEvalxy2uv`, random points | `crgEvalxy2uv` along the road |
-|------|------|---------------|----------------|-------------------------------|-------------------------------|
-| `belgian_block.crg` | 3 ms | 19–20 ns | 22 ns | 144–148 ns | 16 ns |
-| `country_road.crg` | 267–278 ms | 26–45 ns | 27–28 ns | 6.5–7.3 µs | 26–27 ns |
-| `crg_refline_Hoki_HoeKi_Grafing.crg` | 122–128 ms | 28–34 ns | 38–40 ns | 224–226 µs | 62–87 ns |
+| File | Load | `crgEvaluv2z` | `crgEvaluv2pk` | `crgEvaluv2xy` | `crgEvalxy2uv`, random points | `crgEvalxy2uv` along the road |
+|------|------|---------------|----------------|----------------|-------------------------------|-------------------------------|
+| `belgian_block.crg` | 3 ms | 19–20 ns | 23 ns | 22 ns | 144–148 ns | 16–18 ns |
+| `country_road.crg` | 267–280 ms | 26–45 ns | 25–26 ns | 27–28 ns | 6.5–7.3 µs | 26–32 ns |
+| `crg_refline_Hoki_HoeKi_Grafing.crg` | 122–130 ms | 28–34 ns | 35–56 ns | 38–40 ns | 224–226 µs | 62–92 ns |
 
-The crate matches or beats the C-API on every query except one. `uv_from_xy_near` is 3 times slower than the C-API on `belgian_block.crg` and 2 times slower on `country_road.crg`. Most of that gap comes from the hint. A `Uv` hint costs an `xy_from_uv` call before the search starts, while the C-API keeps the previous query's position.
+The two are level on single-point queries. Searches from scratch take about three quarters of the C-API's time, and half on `crg_refline_Hoki_HoeKi_Grafing.crg`, because the crate keeps each reference-line node's x and y together in memory. Along the road, the crate is about 5 ns slower than the C-API on `belgian_block.crg` and faster on `crg_refline_Hoki_HoeKi_Grafing.crg`. Rebuilding the benchmark alone moves these 20 ns figures by up to 30 %, so differences of a few nanoseconds are noise.
 
 ## Development
 

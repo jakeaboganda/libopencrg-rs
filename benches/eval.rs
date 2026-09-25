@@ -40,6 +40,11 @@ fn main() {
                 black_box(grid.normal_at_uv(black_box(uv)));
             }
         });
+        report("heading_at_uv", || {
+            for &uv in &points {
+                black_box(grid.heading_at_uv(black_box(uv)));
+            }
+        });
         report("xy_from_uv", || {
             for &uv in &points {
                 black_box(grid.xy_from_uv(black_box(uv)));

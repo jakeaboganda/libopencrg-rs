@@ -292,6 +292,7 @@ impl CrgGrid {
         (c, d10, z01 - z00, z00)
     }
 
+    #[inline(always)]
     fn locate(&self, uv: Uv, borders: &Borders) -> Option<Cell> {
         let mut grid = true;
         let mut bank = true;

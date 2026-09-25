@@ -8,8 +8,8 @@ use crate::{Heading, Uv, Xy};
 
 #[derive(Clone, Debug)]
 pub(crate) struct RefLine {
-    pub x: Vec<f64>,
-    pub y: Vec<f64>,
+    /// Node positions as `[x, y]`, kept together so that each node is one cache access.
+    pub points: Vec<[f64; 2]>,
     /// Heading per cross section; empty for a straight line without a heading channel.
     pub phi: Vec<f64>,
     pub first: End,
@@ -48,15 +48,13 @@ impl RefLine {
         let (x0, y0) = (road.start_x.unwrap_or(0.0), road.start_y.unwrap_or(0.0));
         let phi0 = road.start_phi.unwrap_or(0.0);
         let end = road.end_x.zip(road.end_y);
-        let mut x = vec![0.0; n];
-        let mut y = vec![0.0; n];
+        let mut p = vec![[0.0; 2]; n];
 
         let phi = match phi {
             None => {
                 let (sin, cos) = phi0.sin_cos();
-                for i in 0..n {
-                    x[i] = x0 + i as f64 * inc * cos;
-                    y[i] = y0 + i as f64 * inc * sin;
+                for (i, p) in p.iter_mut().enumerate() {
+                    *p = [x0 + i as f64 * inc * cos, y0 + i as f64 * inc * sin];
                 }
                 Vec::new()
             }
@@ -64,34 +62,34 @@ impl RefLine {
                 if let Some((ex, ey)) = end {
                     // Integrate back from the end, then forward from the start, blending
                     // toward the backward result.
-                    x[n - 1] = ex;
-                    y[n - 1] = ey;
+                    p[n - 1] = [ex, ey];
                     for i in (1..n).rev() {
-                        x[i - 1] = x[i] - inc * phi[i].cos();
-                        y[i - 1] = y[i] - inc * phi[i].sin();
+                        p[i - 1] = [p[i][0] - inc * phi[i].cos(), p[i][1] - inc * phi[i].sin()];
                     }
-                    x[0] = x0;
-                    y[0] = y0;
+                    p[0] = [x0, y0];
                     for i in 0..n - 1 {
                         let fraction = (i + 1) as f64 / (n - 1) as f64;
-                        x[i + 1] = (1.0 - fraction) * (x[i] + inc * phi[i + 1].cos())
-                            + fraction * x[i + 1];
-                        y[i + 1] = (1.0 - fraction) * (y[i] + inc * phi[i + 1].sin())
-                            + fraction * y[i + 1];
+                        p[i + 1] = [
+                            (1.0 - fraction) * (p[i][0] + inc * phi[i + 1].cos())
+                                + fraction * p[i + 1][0],
+                            (1.0 - fraction) * (p[i][1] + inc * phi[i + 1].sin())
+                                + fraction * p[i + 1][1],
+                        ];
                     }
                 } else {
-                    x[0] = x0;
-                    y[0] = y0;
+                    p[0] = [x0, y0];
                     for i in 0..n - 1 {
-                        x[i + 1] = x[i] + inc * phi[i + 1].cos();
-                        y[i + 1] = y[i] + inc * phi[i + 1].sin();
+                        p[i + 1] = [
+                            p[i][0] + inc * phi[i + 1].cos(),
+                            p[i][1] + inc * phi[i + 1].sin(),
+                        ];
                     }
                 }
                 phi
             }
         };
 
-        let (x1, y1) = end.unwrap_or((x[n - 1], y[n - 1]));
+        let (x1, y1) = end.unwrap_or((p[n - 1][0], p[n - 1][1]));
         // The C-API uses 0 when REFERENCE_LINE_END_PHI is missing; the last heading is used
         // instead.
         let phi1 = road
@@ -100,8 +98,7 @@ impl RefLine {
         let mut line = RefLine {
             first: End::new(x0, y0, phi0),
             last: End::new(x1, y1, phi1),
-            x,
-            y,
+            points: p,
             phi,
             closed: false,
         };
@@ -131,7 +128,7 @@ impl RefLine {
             rotate(&mut x, &mut y, center, angle);
             *end = End::new(x + shift.x, y + shift.y, end.phi + angle);
         }
-        for (x, y) in self.x.iter_mut().zip(&mut self.y) {
+        for [x, y] in &mut self.points {
             rotate(x, y, center, angle);
             *x += shift.x;
             *y += shift.y;
@@ -142,31 +139,34 @@ impl RefLine {
     /// Search start for a point with no usable hint: the nearest of every tenth node and the
     /// last node.
     pub fn coarse_index(&self, xy: Xy) -> usize {
-        let n = self.x.len();
-        let (mut best, mut best_dist2) = (0, 0.0);
-        let mut i = 0;
-        loop {
-            let (dx, dy) = (xy.x - self.x[i], xy.y - self.y[i]);
-            let dist2 = dx * dx + dy * dy;
-            if dist2 < best_dist2 || i == 0 {
-                best = i;
-                best_dist2 = dist2;
+        let dist2 = |p: [f64; 2]| {
+            let (dx, dy) = (xy.x - p[0], xy.y - p[1]);
+            dx * dx + dy * dy
+        };
+        // A plain loop over a slice: iterator forms and indexing into `self` both measured
+        // slower here.
+        let points = &self.points[..];
+        let n = points.len();
+        let (mut best, mut best_dist2) = (0, dist2(points[0]));
+        let mut i = 10;
+        while i < n {
+            let d = dist2(points[i]);
+            if d < best_dist2 {
+                (best, best_dist2) = (i, d);
             }
-            if i + 10 < n {
-                i += 10;
-            } else if i < n - 1 {
-                i = n - 1;
-            } else {
-                return best;
-            }
+            i += 10;
         }
+        if (n - 1) % 10 != 0 && dist2(points[n - 1]) < best_dist2 {
+            best = n - 1;
+        }
+        best
     }
 
     /// Grid position of a global position, searching from node `start` (crgEvalxy2uv.c:48).
     pub fn uv(&self, u: &UAxis, xy: Xy, start: usize) -> Uv {
         let (x, y) = (xy.x, xy.y);
-        let (px, py) = (&self.x, &self.y);
-        let n = px.len();
+        let points = &self.points[..];
+        let n = points.len();
         let mut index = start.max(1);
 
         // Walk up while P lies ahead of the normal through node `index`.
@@ -174,15 +174,16 @@ impl RefLine {
         let mut wrapped = false;
         loop {
             let next = (index + 1).min(n - 1);
-            let dot = (x - px[index]) * (px[next] - px[index - 1])
-                + (y - py[index]) * (py[next] - py[index - 1]);
+            let (a, p, b) = (points[index - 1], points[index], points[next]);
+            let dot = (x - p[0]) * (b[0] - a[0]) + (y - p[1]) * (b[1] - a[1]);
             if dot <= 0.0 || dot.is_nan() {
                 break;
             }
             if index < n - 1 {
                 index += 1;
             } else if self.closed && !wrapped {
-                wrap_dot = (x - px[0]) * (px[1] - px[0]) + (y - py[0]) * (py[1] - py[0]);
+                let (a, b) = (points[0], points[1]);
+                wrap_dot = (x - a[0]) * (b[0] - a[0]) + (y - a[1]) * (b[1] - a[1]);
                 if wrap_dot <= 0.0 {
                     break;
                 }
@@ -199,9 +200,7 @@ impl RefLine {
         let mut dot;
         loop {
             let i0 = index.saturating_sub(2);
-            p0 = [px[i0], py[i0]];
-            p1 = [px[index - 1], py[index - 1]];
-            p2 = [px[index], py[index]];
+            (p0, p1, p2) = (points[i0], points[index - 1], points[index]);
             dot = (x - p1[0]) * (p2[0] - p0[0]) + (y - p1[1]) * (p2[1] - p0[1]);
             if dot >= 0.0 || dot.is_nan() {
                 break;
@@ -213,8 +212,8 @@ impl RefLine {
                     break;
                 }
                 let last = n - 1;
-                wrap_dot = (x - px[last]) * (px[last] - px[last - 1])
-                    + (y - py[last]) * (py[last] - py[last - 1]);
+                let (a, b) = (points[last - 1], points[last]);
+                wrap_dot = (x - b[0]) * (b[0] - a[0]) + (y - b[1]) * (b[1] - a[1]);
                 if wrap_dot >= 0.0 {
                     break;
                 }
@@ -230,7 +229,8 @@ impl RefLine {
         let d1 = [x - p1[0], y - p1[1]];
         let v = (d21[0] * d1[1] - d21[1] * d1[0]) / (d21[0] * d21[0] + d21[1] * d21[1]).sqrt();
         let i3 = (index + 1).min(n - 1);
-        let d31 = [px[i3] - p1[0], py[i3] - p1[1]];
+        let p3 = points[i3];
+        let d31 = [p3[0] - p1[0], p3[1] - p1[1]];
         let d20 = [p2[0] - p0[0], p2[1] - p0[1]];
         let ta = dot / (d20[0] * d21[0] + d20[1] * d21[1]);
         let tb =
@@ -275,8 +275,9 @@ impl RefLine {
         }
 
         let (n1, n2) = self.mitres(index);
-        let a = [self.x[index] + v * n1[0], self.y[index] + v * n1[1]];
-        let b = [self.x[index + 1] + v * n2[0], self.y[index + 1] + v * n2[1]];
+        let (p1, p2) = (self.points[index], self.points[index + 1]);
+        let a = [p1[0] + v * n1[0], p1[1] + v * n1[1]];
+        let b = [p2[0] + v * n2[0], p2[1] + v * n2[1]];
         let ab = [b[0] - a[0], b[1] - a[1]];
         Xy {
             x: a[0] + frac * ab[0],
@@ -299,9 +300,10 @@ impl RefLine {
         }
         let (n1, n2) = self.mitres(index);
         let v = uv.v;
+        let (p1, p2) = (self.points[index], self.points[index + 1]);
         let ab = [
-            self.x[index + 1] + v * n2[0] - (self.x[index] + v * n1[0]),
-            self.y[index + 1] + v * n2[1] - (self.y[index] + v * n1[1]),
+            p2[0] + v * n2[0] - (p1[0] + v * n1[0]),
+            p2[1] + v * n2[1] - (p1[1] + v * n1[1]),
         ];
         (
             [ab[0] / u.inc, ab[1] / u.inc],
@@ -314,22 +316,21 @@ impl RefLine {
 
     /// Offset directions at both ends of segment `index`, scaled per metre of v.
     fn mitres(&self, index: usize) -> ([f64; 2], [f64; 2]) {
-        let p1 = [self.x[index], self.y[index]];
-        let p2 = [self.x[index + 1], self.y[index + 1]];
+        let (p1, p2) = (self.points[index], self.points[index + 1]);
         let n12 = normalize([-(p2[1] - p1[1]), p2[0] - p1[0]]);
 
         // Offset directions at P1 and P2 bisect the neighbouring segments and are stretched
         // so that the offset line stays parallel to P1P2.
         let mut n1 = n12;
         if index > 0 {
-            let p0 = [self.x[index - 1], self.y[index - 1]];
+            let p0 = self.points[index - 1];
             n1 = normalize([-(p2[1] - p0[1]), p2[0] - p0[0]]);
         }
         let n1 = stretch(n1, n12);
 
         let mut n2 = n12;
-        if index < self.x.len() - 2 {
-            let p3 = [self.x[index + 2], self.y[index + 2]];
+        if index < self.points.len() - 2 {
+            let p3 = self.points[index + 2];
             n2 = normalize([-(p3[1] - p1[1]), p3[0] - p1[0]]);
         }
         let n2 = stretch(n2, n12);
@@ -378,10 +379,13 @@ impl RefLine {
             }
         } else {
             let hd = 1.0 / (u.inc * nu as f64).powf(3.0);
-            let dx0 = self.x[index] - self.x[index - nu];
-            let dx1 = self.x[index + nu] - self.x[index];
-            let dy0 = self.y[index] - self.y[index - nu];
-            let dy1 = self.y[index + nu] - self.y[index];
+            let (p0, p1, p2) = (
+                self.points[index - nu],
+                self.points[index],
+                self.points[index + nu],
+            );
+            let (dx0, dx1) = (p1[0] - p0[0], p2[0] - p1[0]);
+            let (dy0, dy1) = (p1[1] - p0[1], p2[1] - p1[1]);
             Heading {
                 phi: self.phi[index + 1],
                 curvature: (dx0 * dy1 - dy0 * dx1) * hd,

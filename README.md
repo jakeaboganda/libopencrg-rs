@@ -3,21 +3,19 @@
 A pure-Rust reader and evaluator for [ASAM OpenCRG](https://www.asam.net/standards/detail/opencrg/) road surface files (`.crg`). It has no dependencies, reads ASCII and binary files, and matches the ASAM OpenCRG 2.0 C-API to the last bit on the test fixtures.
 
 ```rust,no_run
-use opencrg::{CrgGrid, Uv, Xy};
+use opencrg::{CrgGrid, SearchHint, Uv, Xy};
 
 fn main() -> Result<(), opencrg::Error> {
     let grid = CrgGrid::from_path("belgian_block.crg")?;
     let z = grid.elevation_at_uv(Uv { u: 12.0, v: 0.4 });
     let normal = grid.normal_at_uv(Uv { u: 12.0, v: 0.4 });
 
-    // A moving point: search once, then start each search from the previous result.
-    let mut uv = grid.uv_from_xy(Xy { x: 3.0, y: 1.0 });
-    for step in 1..100 {
+    // A moving point: each search starts where the previous one ended.
+    let mut hint = SearchHint::default();
+    let mut uv = None;
+    for step in 0..100 {
         let xy = Xy { x: 3.0 + 0.1 * f64::from(step), y: 1.0 };
-        uv = match uv {
-            Some(hint) => grid.uv_from_xy_near(xy, hint),
-            None => grid.uv_from_xy(xy),
-        };
+        uv = grid.uv_from_xy_near(xy, &mut hint);
     }
     println!("{z:?} {normal:?} {uv:?}");
     Ok(())
@@ -48,7 +46,7 @@ Queries. Grid coordinates are `Uv`: u along the reference line, v to its left, i
 | `heading_at_uv` | Reference-line heading and curvature of the parallel line through the point |
 | `xy_from_uv` | Global position |
 | `uv_from_xy` | Grid position, searching from scratch |
-| `uv_from_xy_near` | Grid position, searching from a hint within 2.2 m |
+| `uv_from_xy_near` | Grid position for a moving point. A `SearchHint` carries each search's end to the next query |
 
 `Some` values are always finite. `z_values`, `dims`, `z_shift`, `u_range`, and `v_range` expose the raw grid, for example to build a texture without copying.
 
@@ -72,7 +70,7 @@ Two features load with `Error::Unsupported`:
 - Reference lines given as x, y, or u data channels.
 - `REFLINE_CONTINUATION = 1` on a closed reference line, which continues u around the track.
 
-The C-API's contact-point settings other than the search hint, such as history size, have no equivalent.
+The C-API's contact-point settings, such as history size and search distances, have no equivalent.
 
 ## Differences from the C-API
 
@@ -84,7 +82,7 @@ Where the C-API has a bug or leaves a value undefined, the crate does the follow
 - **Missing core-area headers.** Without `LONG_SECTION_V_RIGHT/LEFT` or `REFERENCE_LINE_END_PHI`, the C-API uses 0. The crate uses the outer long sections and the last heading. No sample file is affected.
 - **On a closed reference line, `border_mode_u = Zero` does not change `uv_from_xy`.** The C-API checks the wrong option there and switches to closed-track mode.
 - **The xy to uv search stops after one lap** of a closed reference line. The C-API can loop forever.
-- **`uv_from_xy_near` takes one hint** in place of the C-API's 50-entry history, with the same 2.2 m cut-off. For a point on a road that overlaps itself, `uv_from_xy` may pick a different branch than the C-API would from its history.
+- **`SearchHint` keeps one entry** in place of the C-API's 50-entry history, with the same 2.2 m cut-off. On a road that overlaps itself, a point more than 2.2 m from the previous query can land on a different branch than the C-API would pick from its older entries.
 - **Invalid scale factors fail.** Length or width factors of 0 or less and non-finite factors are `Error::Invalid`. The C-API reports a failed check and evaluates anyway.
 - **Ignored, as in effect in the C-API:** `REFERENCE_LINE_OFFSET_*`, and the `REFLINE_SEARCH_*` options in a file.
 - **`crgCheck` is not run.** Its curvature test rejects files the C-API evaluates correctly, such as ASAM's `crg_local_curv_test_ok.crg`.

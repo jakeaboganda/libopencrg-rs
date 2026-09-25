@@ -12,6 +12,15 @@ pub struct Xy {
     pub y: f64,
 }
 
+/// Search state for a moving point, passed to
+/// [`CrgGrid::uv_from_xy_near`](crate::CrgGrid::uv_from_xy_near): the previous query's
+/// position and the node its search ended at, as in the C-API's search history.
+/// `SearchHint::default()` is empty.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SearchHint {
+    pub(crate) last: Option<(Xy, usize)>,
+}
+
 /// Grid elevation and its slopes, without reference-line height, slope, bank, or any shift
 /// applied at load.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

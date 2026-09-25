@@ -162,8 +162,9 @@ impl RefLine {
         best
     }
 
-    /// Grid position of a global position, searching from node `start` (crgEvalxy2uv.c:48).
-    pub fn uv(&self, u: &UAxis, xy: Xy, start: usize) -> Uv {
+    /// Grid position of a global position, searching from node `start` (crgEvalxy2uv.c:48),
+    /// and the node after the segment found, which the C-API keeps as the next start.
+    pub fn uv(&self, u: &UAxis, xy: Xy, start: usize) -> (Uv, usize) {
         let (x, y) = (xy.x, xy.y);
         let points = &self.points[..];
         let n = points.len();
@@ -243,14 +244,15 @@ impl RefLine {
         } else if at > u.last {
             (&self.last, u.last)
         } else {
-            return Uv { u: at, v };
+            return (Uv { u: at, v }, i3);
         };
         let (e, u0) = end;
         let (dx, dy) = (x - e.x, y - e.y);
-        Uv {
+        let uv = Uv {
             u: u0 + dx * e.cos + dy * e.sin,
             v: dy * e.cos - dx * e.sin,
-        }
+        };
+        (uv, i3)
     }
 
     /// Global position of a grid position (crgEvaluv2xy.c:55).

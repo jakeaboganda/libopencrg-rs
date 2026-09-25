@@ -1,7 +1,7 @@
 //! Elevation queries, following `crgDataEvaluv2z` (crgEvalz.c:64).
 
 use crate::grid::{CrgGrid, Profile};
-use crate::{BorderMode, GridSample, Heading, Normal, Uv, Xy};
+use crate::{BorderMode, GridSample, Heading, Normal, SearchHint, Uv, Xy};
 
 /// Border handling for both axes.
 #[derive(Clone, Copy, Debug)]
@@ -119,35 +119,60 @@ impl CrgGrid {
     /// Where the grid overlaps itself, several positions map to `xy` and the search returns
     /// one of them; which one depends on the start node.
     pub fn uv_from_xy(&self, xy: Xy) -> Option<Uv> {
-        let start = self.refline.coarse_index(xy);
-        self.finite_uv(xy, start)
-    }
-
-    /// Like [`uv_from_xy`](Self::uv_from_xy), but starts the search at `hint`, typically the
-    /// previous result for a moving point. This is much faster on long roads and stays on the
-    /// same branch where the grid overlaps itself. A hint whose position is 2.2 m or more
-    /// from `xy` is ignored, as the C-API ignores history that far away.
-    pub fn uv_from_xy_near(&self, xy: Xy, hint: Uv) -> Option<Uv> {
-        let from = self.xy_from_uv(hint);
-        let (dx, dy) = (xy.x - from.x, xy.y - from.y);
-        // The C-API's default dCrgCpOptionRefLineFar, squared.
-        let far = 2.2 * 2.2;
-        let start = if dx * dx + dy * dy < far {
-            // The C-API remembers the node after the segment it found.
-            let segment = ((hint.u - self.u.first) / self.u.inc).floor();
-            (segment.clamp(0.0, (self.u.n - 2) as f64) as usize + 2).min(self.u.n - 1)
-        } else {
-            self.refline.coarse_index(xy)
-        };
-        self.finite_uv(xy, start)
-    }
-
-    fn finite_uv(&self, xy: Xy, start: usize) -> Option<Uv> {
         if !(xy.x.is_finite() && xy.y.is_finite()) {
             return None;
         }
-        let uv = self.refline.uv(&self.u, xy, start);
-        (uv.u.is_finite() && uv.v.is_finite()).then_some(uv)
+        let start = self.refline.coarse_index(xy);
+        finite(self.refline.uv(&self.u, xy, start).0)
+    }
+
+    /// Like [`uv_from_xy`](Self::uv_from_xy), but for a moving point: the search starts where
+    /// the previous search in `hint` ended, and `hint` then records this one. This is much
+    /// faster on long roads and stays on the same branch where the grid overlaps itself. As in
+    /// the C-API, a previous position 2.2 m or more from `xy` is ignored. Non-finite input
+    /// returns `None` and leaves `hint` unchanged.
+    ///
+    /// ```
+    /// # let grid = opencrg::CrgGrid::from_bytes(b"$ROAD_CRG
+    /// # REFERENCE_LINE_INCREMENT = 1.0
+    /// # LONG_SECTION_V_RIGHT = -0.5
+    /// # LONG_SECTION_V_INCREMENT = 0.5
+    /// # $
+    /// # $KD_Definition
+    /// # #:LRFI
+    /// # D:long section 1,m
+    /// # D:long section 2,m
+    /// # D:long section 3,m
+    /// # $
+    /// # $$$$
+    /// #  0.0000000 0.0000000 0.0000000
+    /// #  0.0000000 0.0000000 0.0000000
+    /// #  0.0000000 0.0000000 0.0000000
+    /// # ")?;
+    /// use opencrg::{SearchHint, Xy};
+    ///
+    /// let mut hint = SearchHint::default();
+    /// for step in 0..20 {
+    ///     let xy = Xy { x: 0.1 * f64::from(step), y: 0.2 };
+    ///     let uv = grid.uv_from_xy_near(xy, &mut hint).unwrap();
+    ///     assert!((uv.u - xy.x).abs() < 1e-12 && (uv.v - 0.2).abs() < 1e-12);
+    /// }
+    /// # Ok::<(), opencrg::Error>(())
+    /// ```
+    pub fn uv_from_xy_near(&self, xy: Xy, hint: &mut SearchHint) -> Option<Uv> {
+        if !(xy.x.is_finite() && xy.y.is_finite()) {
+            return None;
+        }
+        // The C-API's default dCrgCpOptionRefLineFar.
+        let far = 2.2;
+        let start = match hint.last {
+            Some((from, start)) if distance2(from, xy) < far * far => start.min(self.u.n - 1),
+            _ => self.refline.coarse_index(xy),
+        };
+        let (uv, next) = self.refline.uv(&self.u, xy, start);
+        // The C-API records the search even when its result is unusable.
+        hint.last = Some((xy, next));
+        finite(uv)
     }
 
     /// Heading of the reference line at `uv.u`, and curvature of the line through `uv`
@@ -409,6 +434,16 @@ impl CrgGrid {
             smooth_side,
         })
     }
+}
+
+/// `uv` if both coordinates are finite.
+fn finite(uv: Uv) -> Option<Uv> {
+    (uv.u.is_finite() && uv.v.is_finite()).then_some(uv)
+}
+
+fn distance2(a: Xy, b: Xy) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    dx * dx + dy * dy
 }
 
 fn border_kind(mode: BorderMode) -> Border {
@@ -697,22 +732,23 @@ mod tests {
     #[test]
     fn xy_to_uv_round_trips() {
         let grid = CrgGrid::from_bytes(&fixture("handmade_curved_banked_sloped.crg")).unwrap();
-        let mut hint = uv(0.0, 0.0);
+        let mut hint = SearchHint::default();
         for i in 0..=40 {
             let want = uv(0.5 * i as f64, 1.2 * (0.3 * i as f64).sin());
             let xy = grid.xy_from_uv(want);
-            for got in [grid.uv_from_xy(xy), grid.uv_from_xy_near(xy, hint)] {
+            for got in [grid.uv_from_xy(xy), grid.uv_from_xy_near(xy, &mut hint)] {
                 let got = got.unwrap();
                 assert!((got.u - want.u).abs() < 1e-9 && (got.v - want.v).abs() < 1e-9);
             }
-            hint = want;
         }
+        let before = hint;
         let nan = Xy {
             x: f64::NAN,
             y: 0.0,
         };
         assert_eq!(grid.uv_from_xy(nan), None);
-        assert_eq!(grid.uv_from_xy_near(nan, hint), None);
+        assert_eq!(grid.uv_from_xy_near(nan, &mut hint), None);
+        assert_eq!(hint, before);
     }
 
     #[test]

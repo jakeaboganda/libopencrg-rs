@@ -50,7 +50,7 @@ mod types;
 
 pub use error::Error;
 pub use grid::CrgGrid;
-pub use types::{BorderMode, GridSample, Heading, LoadOptions, Normal, Uv, Xy};
+pub use types::{BorderMode, GridSample, Heading, LoadOptions, Normal, SearchHint, Uv, Xy};
 
 // The README promises that one grid can serve many threads.
 const _: () = {

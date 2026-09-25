@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use opencrg::{BorderMode, CrgGrid, LoadOptions, Uv, Xy};
+use opencrg::{BorderMode, CrgGrid, LoadOptions, SearchHint, Uv, Xy};
 
 /// Absolute tolerance for elevations and positions, in metres.
 const TOLERANCE: f64 = 1e-9;
@@ -52,7 +52,7 @@ fn check_case(path: &Path) -> Vec<String> {
     let mut failures = Vec::new();
     let mut grid = None;
     // The previous uv result since the last reset, which the C-API's search starts from.
-    let mut hint = None;
+    let mut hint = SearchHint::default();
     for line in lines {
         if let Some(option) = line.strip_prefix("option ") {
             let (key, value) = option.split_once('=').unwrap();
@@ -146,16 +146,13 @@ fn check_case(path: &Path) -> Vec<String> {
                     failures.push(format!("{query}: got {got:?}, want {want:?}"));
                 }
             }
-            "reset" => hint = None,
+            "reset" => hint = SearchHint::default(),
             "uv" => {
                 let xy = Xy {
                     x: args[0],
                     y: args[1],
                 };
-                let got = match hint {
-                    None => grid.uv_from_xy(xy),
-                    Some(hint) => grid.uv_from_xy_near(xy, hint),
-                };
+                let got = grid.uv_from_xy_near(xy, &mut hint);
                 let want = (expected != "none").then(|| numbers(expected));
                 let ok = match (got, &want) {
                     (Some(got), Some(want)) => {
@@ -167,7 +164,6 @@ fn check_case(path: &Path) -> Vec<String> {
                 if !ok {
                     failures.push(format!("{query}: got {got:?}, want {want:?}"));
                 }
-                hint = got;
             }
             _ => panic!("unknown command {command}"),
         }

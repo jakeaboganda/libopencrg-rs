@@ -5,7 +5,7 @@ use std::hint::black_box;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use opencrg::{CrgGrid, Uv};
+use opencrg::{CrgGrid, SearchHint, Uv};
 
 const FIXTURES: [&str; 4] = [
     "crg-txt/handmade_curved_banked_sloped.crg",
@@ -60,11 +60,10 @@ fn main() {
             })
             .collect();
         report("uv_from_xy_near along the road", || {
-            let mut hint = Uv { u: u0, v: 0.3 };
+            let mut hint = SearchHint::default();
             for &xy in &track {
-                hint = grid.uv_from_xy_near(black_box(xy), hint).unwrap_or(hint);
+                black_box(grid.uv_from_xy_near(black_box(xy), &mut hint));
             }
-            black_box(hint);
         });
     }
 }

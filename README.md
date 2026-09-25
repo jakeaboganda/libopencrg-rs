@@ -42,8 +42,8 @@ Queries. Grid coordinates are `Uv`: u along the reference line, v to its left, i
 
 | Method | Returns |
 |--------|---------|
-| `elevation_at_uv` | Elevation including reference-line height, bank, and placement; `None` outside the grid with border mode `None` or in a NaN hole |
-| `normal_at_uv` | Unit surface normal in the global frame; `None` also where the grid folds over itself on a tight curve |
+| `elevation_at_uv` | Elevation including reference-line height, bank, and placement. `None` outside the grid with border mode `None`, or in a NaN hole |
+| `normal_at_uv` | Unit surface normal in the global frame. Also `None` where the grid folds over itself on a tight curve |
 | `grid_at_uv` | Grid elevation and slopes only, without reference-line height, bank, or placement shift |
 | `heading_at_uv` | Reference-line heading and curvature of the parallel line through the point |
 | `xy_from_uv` | Global position |
@@ -56,7 +56,16 @@ Queries. Grid coordinates are `Uv`: u along the reference line, v to its left, i
 
 ## Supported features
 
-The crate reads ASCII and binary payloads in single and double precision; straight reference lines and reference lines from a heading channel; slope and bank channels; evenly spaced and positioned long sections; all five border modes with offsets; smoothing zones; `$ROAD_CRG_MODS` placement, scaling, and NaN handling; and includes.
+The crate reads:
+
+- ASCII and binary payloads, in single and double precision.
+- Straight reference lines, and reference lines from a heading channel.
+- Slope and bank channels.
+- Evenly spaced and positioned long sections.
+- All five border modes, with offsets.
+- Smoothing zones.
+- `$ROAD_CRG_MODS` placement, scaling, and NaN handling.
+- Includes.
 
 Two features load with `Error::Unsupported`:
 
@@ -69,34 +78,44 @@ The C-API's contact-point settings other than the search hint, such as history s
 
 Where the C-API has a bug or leaves a value undefined, the crate does the following instead. Everything else matches the C-API.
 
-- **An included file loads as if it were loaded directly.** The C-API drops the included file's `REFERENCE_LINE_END_X/Y/Z` and long-section spacing settings; for `belgian_block.crg` behind a one-line wrapper that moves 33 of 278 sampled elevations by up to 2.4 mm.
+- **An included file loads as if it were loaded directly.** The C-API drops the included file's `REFERENCE_LINE_END_X/Y/Z` and long-section spacing settings. For `belgian_block.crg` behind a one-line wrapper, the dropped settings move 33 of 278 sampled elevations by up to 2.4 mm.
 - **Includes nest up to 8 levels.** The C-API builds a nested include's path by appending it to its parent's, so only one level works. Where levels disagree, the least nested file's options and modifiers apply.
 - **Relative include names resolve against the including file**, not the working directory. `from_path` expands `$VARIABLE` as the C-API does and reports a file that includes itself as `Error::IncludeCycle`.
-- **Missing core-area headers.** Without `LONG_SECTION_V_RIGHT/LEFT` or `REFERENCE_LINE_END_PHI`, the C-API uses 0; the crate uses the outer long sections and the last heading. No sample file is affected.
+- **Missing core-area headers.** Without `LONG_SECTION_V_RIGHT/LEFT` or `REFERENCE_LINE_END_PHI`, the C-API uses 0. The crate uses the outer long sections and the last heading. No sample file is affected.
 - **On a closed reference line, `border_mode_u = Zero` does not change `uv_from_xy`.** The C-API checks the wrong option there and switches to closed-track mode.
-- **The xy to uv search stops after one lap** of a closed reference line; the C-API can loop forever.
+- **The xy to uv search stops after one lap** of a closed reference line. The C-API can loop forever.
 - **`uv_from_xy_near` takes one hint** in place of the C-API's 50-entry history, with the same 2.2 m cut-off. For a point on a road that overlaps itself, `uv_from_xy` may pick a different branch than the C-API would from its history.
-- **Invalid scale factors fail.** Length or width factors of 0 or less and non-finite factors are `Error::Invalid`; the C-API reports a failed check and evaluates anyway.
+- **Invalid scale factors fail.** Length or width factors of 0 or less and non-finite factors are `Error::Invalid`. The C-API reports a failed check and evaluates anyway.
 - **Ignored, as in effect in the C-API:** `REFERENCE_LINE_OFFSET_*`, and the `REFLINE_SEARCH_*` options in a file.
 - **`crgCheck` is not run.** Its curvature test rejects files the C-API evaluates correctly, such as ASAM's `crg_local_curv_test_ok.crg`.
 
 ## wasm
 
-The crate needs `std` and builds for `wasm32-unknown-unknown`. There, `from_path` returns `Error::Io`; load with `from_bytes`, or `from_bytes_with` for files with includes. Under WASI, `from_path` works in the directories the runtime grants.
+The crate needs `std` and builds for `wasm32-unknown-unknown`. There, `from_path` returns `Error::Io`. Load with `from_bytes`, or with `from_bytes_with` for files with includes. Under WASI, `from_path` works in the directories the runtime grants.
 
-Results under wasm match native, except curvature, which differs by up to 1e-10 per metre: wasm uses Rust's own `sin` and `cos`, and curvature divides small differences of reference-line positions.
+Results under wasm match native, except curvature, which differs by up to 1e-10 per metre. Wasm uses Rust's own `sin` and `cos`, and curvature divides small differences of reference-line positions.
 
 ## Performance
 
-`cargo bench`, on an AMD Ryzen 9 5900HS, per query:
+`cargo bench` on an AMD Ryzen 9 5900HS, pinned to one core with `taskset -c 2`. Times are per query, and each range spans three runs.
 
-| File | Nodes | Load | `elevation_at_uv` | `normal_at_uv` | `uv_from_xy` | `uv_from_xy_near` |
-|------|-------|------|-------------------|----------------|--------------|-------------------|
-| `belgian_block.crg` | 1001 × 341 | 6 ms | 24–79 ns | 75–115 ns | 170 ns | 52 ns |
-| `country_road.crg` | 56 897 × 370 | 200 ms | 35 ns | 90–120 ns | 9 µs | 70 ns |
-| `crg_refline_Hoki_HoeKi_Grafing.crg` | 881 975 × 3 | 105 ms | 26 ns | 90 ns | 250 µs | 80 ns |
+| File | Nodes | Load | `elevation_at_uv` | `normal_at_uv` | `xy_from_uv` | `uv_from_xy` | `uv_from_xy_near` |
+|------|-------|------|-------------------|----------------|--------------|--------------|-------------------|
+| `belgian_block.crg` | 1001 × 341 | 3–5 ms | 19–21 ns | 70–72 ns | 21 ns | 111–113 ns | 47–48 ns |
+| `country_road.crg` | 56 897 × 370 | 170–176 ms | 26 ns | 80–82 ns | 26–27 ns | 5.2–5.9 µs | 56–58 ns |
+| `crg_refline_Hoki_HoeKi_Grafing.crg` | 881 975 × 3 | 71–76 ms | 20–26 ns | 80–92 ns | 30–31 ns | 108–116 µs | 65–66 ns |
 
-Ranges span two runs. `uv_from_xy` scans every tenth reference-line node, like the C-API with no history, so it grows with road length; `uv_from_xy_near` walks from the hint and stays constant for a vehicle moving 0.25 m per query.
+`uv_from_xy` scans every tenth reference-line node, like the C-API with no history, so its time grows with road length. `uv_from_xy_near` walks from the hint. For a vehicle that moves 0.25 m per query, its time does not depend on road length.
+
+The C-API answering the same queries, built with `gcc -O3` and timed the same way:
+
+| File | Load | `crgEvaluv2z` | `crgEvaluv2xy` | `crgEvalxy2uv`, random points | `crgEvalxy2uv` along the road |
+|------|------|---------------|----------------|-------------------------------|-------------------------------|
+| `belgian_block.crg` | 3 ms | 19–20 ns | 22 ns | 144–148 ns | 16 ns |
+| `country_road.crg` | 267–278 ms | 26–45 ns | 27–28 ns | 6.5–7.3 µs | 26–27 ns |
+| `crg_refline_Hoki_HoeKi_Grafing.crg` | 122–128 ms | 28–34 ns | 38–40 ns | 224–226 µs | 62–87 ns |
+
+The crate matches or beats the C-API on every query except one. `uv_from_xy_near` is 3 times slower than the C-API on `belgian_block.crg` and 2 times slower on `country_road.crg`. Most of that gap comes from the hint. A `Uv` hint costs an `xy_from_uv` call before the search starts, while the C-API keeps the previous query's position.
 
 ## Development
 
@@ -116,8 +135,8 @@ cmake --build target/oracle
 tools/oracle/record.sh
 ```
 
-The test fixtures come from ASAM OpenCRG; see `tests/fixtures/NOTICE`.
+The test fixtures come from ASAM OpenCRG. See `tests/fixtures/NOTICE`.
 
 ## Licence
 
-Apache License 2.0; see `LICENSE-APACHE`.
+Apache License 2.0. See `LICENSE-APACHE`.
